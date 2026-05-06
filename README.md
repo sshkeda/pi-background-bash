@@ -12,6 +12,8 @@ The tool returns immediately with a deterministic job id. When the command finis
 
 The result body delegates to Pi's built-in `bash` tool, so output formatting matches native Pi bash behavior: combined stdout/stderr, tail truncation, full-output temp files, `(no output)`, nonzero exit text, and timeout text.
 
+Interactive rendering also reuses Pi's native bash call/result renderers: the start row appears as a `$ command` block with the exact start message, and the completion row is linked by job id (for example `↳ bg_1 done`) before the same `$ command` and native bash output.
+
 ## Install locally
 
 ```bash
