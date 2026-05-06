@@ -1,6 +1,7 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { BashToolDetails, ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { createBashTool } from "@mariozechner/pi-coding-agent";
+import { createBashTool, createBashToolDefinition } from "@mariozechner/pi-coding-agent";
+import { Box, Container, Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 
 const MAX_ACTIVE_JOBS = 10;
@@ -14,6 +15,8 @@ type BackgroundBashDetails = BashToolDetails & {
 	outcome: Outcome;
 	exitCode: number | null;
 	durationMs?: number;
+	body?: string;
+	cwd?: string;
 };
 
 type ActiveJob = {
@@ -83,6 +86,57 @@ function buildXmlResult(job: ActiveJob, outcome: Outcome, exitCode: number | nul
 	return `<background_bash_result ${attrs.join(" ")}>\n${body}\n</background_bash_result>`;
 }
 
+function renderNativeBashResult(command: string, body: string, details: BackgroundBashDetails | undefined, expanded: boolean, theme: any) {
+	const cwd = details?.cwd ?? process.cwd();
+	const bash = createBashToolDefinition(cwd);
+	const state: any = {
+		startedAt: details?.durationMs === undefined ? undefined : Date.now() - details.durationMs,
+		endedAt: Date.now(),
+		interval: undefined,
+	};
+	const isError = details?.outcome !== "exit" || (details.exitCode !== null && details.exitCode !== 0);
+	const renderContext = (lastComponent: any) => ({
+		args: { command },
+		toolCallId: details?.jobId ?? "background_bash_result",
+		invalidate: () => {},
+		lastComponent,
+		state,
+		cwd,
+		executionStarted: true,
+		argsComplete: true,
+		isPartial: false,
+		expanded,
+		showImages: true,
+		isError,
+	});
+
+	const box = new Box(1, 1, (text) => (isError ? theme.bg("toolErrorBg", text) : theme.bg("toolSuccessBg", text)));
+	if (details?.jobId) {
+		const status =
+			details.outcome === "exit" && (details.exitCode === null || details.exitCode === 0)
+				? "done"
+				: details.outcome === "timeout"
+					? "timed out"
+					: details.outcome === "abort"
+						? "aborted"
+						: "failed";
+		box.addChild(new Text(theme.fg("muted", `↳ ${details.jobId} ${status}`), 0, 0));
+	}
+	const call = bash.renderCall?.({ command }, theme, renderContext(undefined));
+	if (call) box.addChild(call);
+	const result = bash.renderResult?.(
+		{ content: [{ type: "text", text: body }], details },
+		{ expanded, isPartial: false },
+		theme,
+		renderContext(undefined),
+	);
+	if (result) box.addChild(result);
+
+	const container = new Container();
+	container.addChild(box);
+	return container;
+}
+
 function abortAllJobs() {
 	shuttingDown = true;
 	for (const job of activeJobs.values()) {
@@ -119,6 +173,13 @@ function restoreJobCounterFromSession(ctx: { sessionManager?: { getEntries?: () 
 export default function backgroundBashExtension(pi: ExtensionAPI) {
 	installProcessHooks();
 
+	pi.registerMessageRenderer<BackgroundBashDetails>(CUSTOM_TYPE, (message, options, theme) => {
+		const details = message.details;
+		const command = details?.command ?? "";
+		const body = details?.body ?? (typeof message.content === "string" ? message.content : "");
+		return renderNativeBashResult(command, body, details, options.expanded, theme);
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
 		restoreJobCounterFromSession(ctx);
@@ -143,6 +204,13 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			"Do not use background_bash for interactive commands that require stdin.",
 		],
 		parameters: schema,
+		renderCall(args, _theme, context) {
+			return createBashToolDefinition(context.cwd).renderCall?.(args, _theme, context) ?? new Text("", 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const text = getText(result as AgentToolResult<unknown>);
+			return new Text(`\n${theme.fg("toolOutput", text)}`, 0, 0);
+		},
 		async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<BackgroundBashDetails>> {
 			if (signal?.aborted) {
 				return {
@@ -216,6 +284,8 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 					outcome,
 					exitCode,
 					durationMs,
+					body,
+					cwd: ctx.cwd,
 				};
 
 				pi.sendMessage(
@@ -231,7 +301,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text", text: `Background bash job ${job.id} started.` }],
-				details: { jobId: job.id, command: job.command, outcome: "running", exitCode: null },
+				details: { jobId: job.id, command: job.command, outcome: "running", exitCode: null, cwd: ctx.cwd },
 			};
 		},
 	});
