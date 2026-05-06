@@ -1,0 +1,42 @@
+{
+  "name": "pi-background-bash",
+  "version": "0.1.0",
+  "description": "Pi extension that adds background_bash: Pi bash, but asynchronous.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "bash",
+    "background"
+  ],
+  "license": "MIT",
+  "author": "sshkeda",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sshkeda/pi-background-bash.git"
+  },
+  "exports": {
+    ".": "./extensions/background-bash.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && node --test --test-force-exit test/*.mjs"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-agent-core": "^0.73.0",
+    "@mariozechner/pi-coding-agent": "^0.73.0",
+    "@types/node": "^22.0.0",
+    "pi-mock": "file:../pi-mock",
+    "typescript": "^5.0.0",
+    "typebox": "^1.0.55"
+  }
+}
