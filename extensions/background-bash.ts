@@ -1,7 +1,9 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { BashToolDetails, ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { BashToolDetails, ExtensionAPI, ExtensionUIContext, Theme } from "@mariozechner/pi-coding-agent";
 import { createBashTool, createBashToolDefinition } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Text } from "@mariozechner/pi-tui";
+import type { Component, TUI } from "@mariozechner/pi-tui";
+import { Box, Container, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { piContext } from "pi-context";
 import { Type } from "typebox";
 
 const MAX_ACTIVE_JOBS = 10;
@@ -14,6 +16,8 @@ type BackgroundBashDetails = BashToolDetails & {
 	command: string;
 	outcome: Outcome;
 	exitCode: number | null;
+	toolCallId?: string;
+	startedAt?: string;
 	durationMs?: number;
 	body?: string;
 	cwd?: string;
@@ -22,6 +26,7 @@ type BackgroundBashDetails = BashToolDetails & {
 type ActiveJob = {
 	id: string;
 	command: string;
+	toolCallId: string;
 	abortController: AbortController;
 	startedAt: number;
 };
@@ -35,6 +40,47 @@ const activeJobs = new Map<string, ActiveJob>();
 let nextJobNumber = 1;
 let shuttingDown = false;
 let processHooksInstalled = false;
+let currentUi: ExtensionUIContext | undefined;
+
+function normalizeCommandForStatus(command: string): string {
+	return command.replace(/\s+/g, " ").trim();
+}
+
+function padToWidth(text: string, width: number): string {
+	return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
+}
+
+function formatElapsedSeconds(startedAt: number): string {
+	const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+	return seconds < 1000 ? String(seconds).padStart(3, "0") : String(seconds);
+}
+
+function createPendingJobsWidget(tui: TUI, theme: Theme): Component & { dispose(): void } {
+	const interval = setInterval(() => tui.requestRender(), 1000);
+	return {
+		render(width: number): string[] {
+			if (width <= 0) return [];
+			return [...activeJobs.values()].map((job) => {
+				const raw = `(${formatElapsedSeconds(job.startedAt)}s) $ ${normalizeCommandForStatus(job.command)}`;
+				const line = padToWidth(truncateToWidth(raw, width, "..."), width);
+				return theme.bg("toolPendingBg", theme.fg("toolTitle", line));
+			});
+		},
+		invalidate() {},
+		dispose() {
+			clearInterval(interval);
+		},
+	};
+}
+
+function updatePendingJobsWidget() {
+	if (!currentUi) return;
+	if (activeJobs.size === 0) {
+		currentUi.setWidget("background-bash-pending", undefined);
+		return;
+	}
+	currentUi.setWidget("background-bash-pending", (tui, theme) => createPendingJobsWidget(tui, theme), { placement: "aboveEditor" });
+}
 
 function getText(result: AgentToolResult<unknown>): string {
 	return result.content
@@ -47,16 +93,6 @@ function getText(result: AgentToolResult<unknown>): string {
 			}
 		})
 		.join("\n");
-}
-
-function escapeXmlAttribute(value: string): string {
-	return value
-		.replace(/&/g, "&amp;")
-		.replace(/"/g, "&quot;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/\r/g, "&#13;")
-		.replace(/\n/g, "&#10;");
 }
 
 function formatDuration(ms: number): string {
@@ -72,18 +108,36 @@ function detectOutcomeAndExitCode(body: string): { outcome: Outcome; exitCode: n
 }
 
 function buildXmlResult(job: ActiveJob, outcome: Outcome, exitCode: number | null, durationMs: number, body: string): string {
-	const attrs = [
-		`job_id="${escapeXmlAttribute(job.id)}"`,
-		`command="${escapeXmlAttribute(job.command)}"`,
-		`outcome="${escapeXmlAttribute(outcome)}"`,
-	];
-	if (exitCode !== null) attrs.push(`exit_code="${exitCode}"`);
-	attrs.push(`duration_ms="${durationMs}"`);
-
 	// Raw body is intentional: it is exactly the text Pi's native bash tool produced.
-	// Pi itself uses XML-ish context wrappers (e.g. <summary>, <provider_tool>) for LLM
-	// semantics, not strict XML parsing; escaping bash output would break native parity.
-	return `<background_bash_result ${attrs.join(" ")}>\n${body}\n</background_bash_result>`;
+	// pi-context only escapes closing wrapper tags so command output cannot
+	// prematurely close the XML-ish context envelope.
+	return piContext({
+		source: "pi-background-bash",
+		kind: "background_bash_result",
+		id: job.id,
+		attrs: {
+			tool_call_id: job.toolCallId,
+			started_at: new Date(job.startedAt).toISOString(),
+			command: job.command,
+			outcome,
+			exit_code: exitCode,
+			duration_ms: durationMs,
+		},
+		body,
+	});
+}
+
+function stripBashInlineTruncationNotice(body: string, details: BackgroundBashDetails | undefined): string {
+	// Pi's bash execute() includes a human-readable truncation suffix in the text
+	// returned to the model, while Pi's native renderResult() also renders the
+	// same information from details.truncation/fullOutputPath. For display, let
+	// the native renderer own that metadata so background_bash does not show the
+	// full-output path twice. Keep message.content/body unchanged for LLM context.
+	if (!details?.fullOutputPath && !details?.truncation?.truncated) return body;
+	return body.replace(
+		/\n\n\[Showing (?:last [^\]\n]+ of line \d+ \(line is [^)]+\)|lines \d+-\d+ of \d+(?: \([^)]+ limit\))?)\. Full output: [^\]\n]+\](?=\n\nCommand (?:exited|timed out|aborted)|$)/,
+		"",
+	);
 }
 
 function renderNativeBashResult(command: string, body: string, details: BackgroundBashDetails | undefined, expanded: boolean, theme: any) {
@@ -120,12 +174,12 @@ function renderNativeBashResult(command: string, body: string, details: Backgrou
 					: details.outcome === "abort"
 						? "aborted"
 						: "failed";
-		box.addChild(new Text(theme.fg("muted", `↳ ${details.jobId} ${status}`), 0, 0));
+		box.addChild(new Text(theme.fg("muted", `↳ ${details.jobId} ${status}.`), 0, 0));
 	}
 	const call = bash.renderCall?.({ command }, theme, renderContext(undefined));
 	if (call) box.addChild(call);
 	const result = bash.renderResult?.(
-		{ content: [{ type: "text", text: body }], details },
+		{ content: [{ type: "text", text: stripBashInlineTruncationNotice(body, details) }], details },
 		{ expanded, isPartial: false },
 		theme,
 		renderContext(undefined),
@@ -160,7 +214,7 @@ function restoreJobCounterFromSession(ctx: { sessionManager?: { getEntries?: () 
 	for (const entry of entries as Array<Record<string, unknown>>) {
 		const details = entry.details as Record<string, unknown> | undefined;
 		const content = typeof entry.content === "string" ? entry.content : undefined;
-		const candidates = [details?.jobId, content?.match(/job_id="bg_(\d+)"/)?.[1], content?.match(/Background bash job bg_(\d+)/)?.[1]];
+		const candidates = [details?.jobId, content?.match(/<pi_context\b[^>]*\bid="bg_(\d+)"/)?.[1], content?.match(/Background bash job bg_(\d+)/)?.[1]];
 		for (const candidate of candidates) {
 			if (typeof candidate !== "string") continue;
 			const match = candidate.match(/^bg_(\d+)$/) ?? candidate.match(/^(\d+)$/);
@@ -182,25 +236,29 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
+		currentUi = ctx.hasUI ? ctx.ui : undefined;
 		restoreJobCounterFromSession(ctx);
+		updatePendingJobsWidget();
 	});
 
 	pi.on("session_shutdown", async () => {
 		abortAllJobs();
+		updatePendingJobsWidget();
+		currentUi = undefined;
 	});
 
 	pi.registerTool({
 		name: "background_bash",
 		label: "background_bash",
 		description:
-			"Execute a bash command asynchronously in the current working directory. Returns immediately with a job id. When the command finishes, a <background_bash_result> message is injected into the session using the same output/truncation style as Pi's bash tool. Use for long-running non-interactive commands; use bash when the next step depends immediately on the output.",
+			"Execute a bash command asynchronously in the current working directory. Returns immediately with a job id. When the command finishes, a <pi_context source=\"pi-background-bash\" kind=\"background_bash_result\"> message is injected into the session using the same output/truncation style as Pi's bash tool. Use for long-running non-interactive commands; use bash when the next step depends immediately on the command output.",
 		promptSnippet:
-			"Execute long-running bash commands asynchronously; timeout is in seconds. Results arrive later as <background_bash_result> messages.",
+			"Execute long-running bash commands asynchronously; timeout is in seconds. Results arrive later as <pi_context source=\"pi-background-bash\" kind=\"background_bash_result\"> messages.",
 		promptGuidelines: [
 			"Use background_bash instead of bash for long-running non-interactive commands such as builds, full test suites, dev servers, watchers, deploys, downloads, or commands expected to take more than about 10 seconds.",
 			"Use regular bash for quick commands or when the next step depends immediately on the command output.",
 			"After calling background_bash, do not wait for its output in the same turn; continue with independent work or tell the user the background job started.",
-			"When a <background_bash_result> message appears, treat its body like the result of a normal bash command and reference the job_id when reporting it.",
+			"When a <pi_context source=\"pi-background-bash\" kind=\"background_bash_result\"> message appears, treat its body like the result of a normal bash command and reference the id when reporting it.",
 			"Do not use background_bash for interactive commands that require stdin.",
 		],
 		parameters: schema,
@@ -211,7 +269,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			const text = getText(result as AgentToolResult<unknown>);
 			return new Text(`\n${theme.fg("toolOutput", text)}`, 0, 0);
 		},
-		async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<BackgroundBashDetails>> {
+		async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<BackgroundBashDetails>> {
 			if (signal?.aborted) {
 				return {
 					content: [{ type: "text", text: "Background bash job not started: tool call aborted." }],
@@ -234,10 +292,12 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			const job: ActiveJob = {
 				id: `bg_${nextJobNumber++}`,
 				command: params.command,
+				toolCallId,
 				abortController: new AbortController(),
 				startedAt: Date.now(),
 			};
 			activeJobs.set(job.id, job);
+			updatePendingJobsWidget();
 
 			// Intentionally delegates to Pi's built-in bash tool instead of reimplementing
 			// output handling. This preserves native bash semantics: combined stdout/stderr,
@@ -273,6 +333,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				}
 
 				activeJobs.delete(job.id);
+				updatePendingJobsWidget();
 				if (shuttingDown) return;
 
 				const durationMs = Date.now() - job.startedAt;
@@ -283,6 +344,8 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 					command: job.command,
 					outcome,
 					exitCode,
+					toolCallId: job.toolCallId,
+					startedAt: new Date(job.startedAt).toISOString(),
 					durationMs,
 					body,
 					cwd: ctx.cwd,
@@ -301,7 +364,15 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text", text: `Background bash job ${job.id} started.` }],
-				details: { jobId: job.id, command: job.command, outcome: "running", exitCode: null, cwd: ctx.cwd },
+				details: {
+					jobId: job.id,
+					command: job.command,
+					outcome: "running",
+					exitCode: null,
+					toolCallId: job.toolCallId,
+					startedAt: new Date(job.startedAt).toISOString(),
+					cwd: ctx.cwd,
+				},
 			};
 		},
 	});

@@ -20,7 +20,9 @@
     ".": "./extensions/background-bash.ts"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -38,5 +40,8 @@
     "pi-mock": "file:../pi-mock",
     "typescript": "^5.0.0",
     "typebox": "^1.0.55"
+  },
+  "dependencies": {
+    "pi-context": "file:../pi-context"
   }
 }
