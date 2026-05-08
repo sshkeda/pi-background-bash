@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMock, script, text, toolCall } from "pi-mock";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -63,11 +63,19 @@ async function createBgMock(brain, options = {}) {
   });
 }
 
+function makeConfiguredCwd(config) {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-cwd-${process.pid}-${Date.now()}-`));
+  mkdirSync(join(dir, ".pi"), { recursive: true });
+  writeFileSync(join(dir, ".pi", "background-bash.json"), JSON.stringify(config));
+  return dir;
+}
+
 test("bash override returns normal results before the auto-background threshold", async () => {
+  const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
   const mock = await createBgMock(script(
     sh("echo foreground"),
     text("saw foreground result"),
-  ), { env: { PI_BASH_AUTO_BACKGROUND_AFTER: "5" } });
+  ), { cwd });
 
   try {
     const events = await mock.run("run a quick bash command", TIMEOUT);
@@ -76,15 +84,17 @@ test("bash override returns normal results before the auto-background threshold"
     assert.doesNotMatch(all, /moved to background/);
   } finally {
     await mock.close();
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 
 test("bash override automatically moves slow commands to background and injects final result", async () => {
+  const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 0.1 });
   const mock = await createBgMock(script(
     sh("sleep 0.3; echo auto-done"),
     text("initial turn complete"),
     text("saw auto background result"),
-  ), { env: { PI_BASH_AUTO_BACKGROUND_AFTER: "0.1" } });
+  ), { cwd });
 
   try {
     const events = await mock.run("run a slow bash command", TIMEOUT);
@@ -101,6 +111,7 @@ test("bash override automatically moves slow commands to background and injects 
     assert.match(textReq, /auto-done/);
   } finally {
     await mock.close();
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 
@@ -109,7 +120,7 @@ test("bash background true starts immediately in background and injects final re
     shBg("sleep 0.2; echo explicit-bg-done"),
     text("initial turn complete"),
     text("saw explicit background result"),
-  ), { env: { PI_BASH_AUTO_BACKGROUND_AFTER: "30" } });
+  ));
 
   try {
     const events = await mock.run("run a bash command explicitly in the background", TIMEOUT);

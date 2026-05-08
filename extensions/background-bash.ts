@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { AgentToolUpdateCallback, BashToolDetails, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -56,6 +59,10 @@ type ActiveJob = {
 	startedAt: number;
 };
 
+type BackgroundBashConfig = {
+	autoBackgroundAfterSeconds?: number;
+};
+
 const schema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
@@ -100,12 +107,22 @@ function detectOutcomeAndExitCode(body: string): { outcome: Outcome; exitCode: n
 	return { outcome: "error", exitCode: null };
 }
 
-function getAutoBackgroundAfterSeconds(): number {
-	const raw = process.env.PI_BASH_AUTO_BACKGROUND_AFTER;
-	if (raw === undefined || raw.trim() === "") return DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS;
-	const parsed = Number(raw);
-	if (!Number.isFinite(parsed)) return DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS;
-	return parsed;
+function readConfigFile(path: string): BackgroundBashConfig {
+	try {
+		if (!existsSync(path)) return {};
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+		if (!parsed || typeof parsed !== "object") return {};
+		const raw = (parsed as { autoBackgroundAfterSeconds?: unknown }).autoBackgroundAfterSeconds;
+		return typeof raw === "number" && Number.isFinite(raw) ? { autoBackgroundAfterSeconds: raw } : {};
+	} catch {
+		return {};
+	}
+}
+
+function getAutoBackgroundAfterSeconds(cwd?: string): number {
+	const globalConfig = readConfigFile(join(homedir(), ".pi-background-bash", "config.json"));
+	const projectConfig = cwd ? readConfigFile(join(cwd, ".pi", "background-bash.json")) : {};
+	return projectConfig.autoBackgroundAfterSeconds ?? globalConfig.autoBackgroundAfterSeconds ?? DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS;
 }
 
 function formatThreshold(seconds: number): string {
@@ -321,18 +338,18 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated using Pi's native bash limits. Set background: true to run immediately in the background and get a job id. Otherwise, if the command is still running after ${formatThreshold(getAutoBackgroundAfterSeconds())}, it is automatically moved to the background; a <pi_context source="pi-background-bash" kind="background_bash_result"> message is injected when it finishes. Optionally provide a timeout in seconds.`,
-		promptSnippet: `Execute bash commands (ls, grep, find, etc.); timeout is in seconds. Set background: true for long-running non-interactive commands. Commands still running after ${formatThreshold(getAutoBackgroundAfterSeconds())} automatically move to background and wake you with a pi-background-bash result when finished.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated using Pi's native bash limits. Set background: true to run immediately in the background and get a job id. Otherwise, if the command is still running after the configured auto-background threshold (${formatThreshold(DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS)} by default), it is automatically moved to the background; a <pi_context source="pi-background-bash" kind="background_bash_result"> message is injected when it finishes. Optionally provide a timeout in seconds.`,
+		promptSnippet: `Execute bash commands (ls, grep, find, etc.); timeout is in seconds. Set background: true for long-running non-interactive commands. Commands still running after the configured auto-background threshold (${formatThreshold(DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS)} by default) automatically move to background and wake you with a pi-background-bash result when finished.`,
 		promptGuidelines: [
 			"Use bash with background: true for long-running non-interactive commands such as builds, full test suites, dev servers, watchers, deploys, downloads, or commands you do not need before the next step.",
-			`Use bash normally for shell commands; Pi automatically moves bash commands that run longer than ${formatThreshold(getAutoBackgroundAfterSeconds())} to the background.`,
+			`Use bash normally for shell commands; Pi automatically moves bash commands that run longer than the configured auto-background threshold (${formatThreshold(DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS)} by default) to the background.`,
 			"When bash reports that a command started or moved to background, do not retry it just to wait; continue independent work or tell the user the job is running.",
 			"When a <pi_context source=\"pi-background-bash\" kind=\"background_bash_result\"> message appears, treat it like the final result of the original bash command.",
 			"Do not use bash for interactive commands that require stdin unless the user explicitly asks for that behavior.",
 		],
 		parameters: schema,
 		async execute(toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<BashToolDetails | BackgroundBashDetails>> {
-			const autoAfterSeconds = getAutoBackgroundAfterSeconds();
+			const autoAfterSeconds = getAutoBackgroundAfterSeconds(ctx.cwd);
 
 			if (signal?.aborted) {
 				throw new Error("Command aborted");

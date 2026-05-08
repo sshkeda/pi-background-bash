@@ -1,6 +1,6 @@
 {
   "name": "pi-background-bash",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Pi extension that makes long-running bash commands async with background:true and automatic 30s backgrounding.",
   "type": "module",
   "keywords": [
@@ -32,7 +32,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && node --test --test-force-exit test/*.mjs"
+    "test": "npm run typecheck && node --test --test-force-exit test/*.mjs",
+    "hooks:install": "lefthook install"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -46,7 +47,8 @@
     "@types/node": "^22.0.0",
     "pi-mock": "github:sshkeda/pi-mock",
     "typescript": "^5.0.0",
-    "typebox": "^1.0.55"
+    "typebox": "^1.0.55",
+    "lefthook": "^1.10.10"
   },
   "files": [
     "index.ts",

@@ -71,17 +71,23 @@ The result body delegates to Pi's native `bash` implementation, so output format
 
 Default auto-background threshold: `30` seconds.
 
-Override it with an environment variable:
+Configure the global threshold in `~/.pi-background-bash/config.json`:
 
-```bash
-PI_BASH_AUTO_BACKGROUND_AFTER=10 pi
+```json
+{
+  "autoBackgroundAfterSeconds": 10
+}
 ```
 
 Disable automatic backgrounding while keeping `background: true` available:
 
-```bash
-PI_BASH_AUTO_BACKGROUND_AFTER=0 pi
+```json
+{
+  "autoBackgroundAfterSeconds": 0
+}
 ```
+
+You can also override the threshold for a single project with `.pi/background-bash.json` in that project. Project config wins over global config.
 
 ## Agent prompt behavior
 
@@ -102,11 +108,12 @@ This is a Pi extension. Like any Pi package, it runs with your local user permis
 
 ```bash
 npm install
+npm run hooks:install
 npm run typecheck
 npm test
 ```
 
-The test suite uses [`pi-mock`](https://github.com/sshkeda/pi-mock) to exercise the extension against a real Pi process.
+This repo uses Lefthook for local pre-commit checks. The test suite uses [`pi-mock`](https://github.com/sshkeda/pi-mock) to exercise the extension against a real Pi process.
 
 ## License
 
