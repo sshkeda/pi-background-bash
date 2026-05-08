@@ -1,8 +1,8 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { BashToolDetails, ExtensionAPI, ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { BashToolDetails, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
-import { Box, Container, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { createPiPending } from "pi-pending";
 import { piContext } from "pi-context";
 import { Type } from "typebox";
 
@@ -37,49 +37,16 @@ const schema = Type.Object({
 });
 
 const activeJobs = new Map<string, ActiveJob>();
+const pendingJobs = createPiPending({
+	namespace: "background-bash",
+	format: (job) => `$ ${normalizeCommandForStatus(job.text)}`,
+});
 let nextJobNumber = 1;
 let shuttingDown = false;
 let processHooksInstalled = false;
-let currentUi: ExtensionUIContext | undefined;
 
 function normalizeCommandForStatus(command: string): string {
 	return command.replace(/\s+/g, " ").trim();
-}
-
-function padToWidth(text: string, width: number): string {
-	return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
-}
-
-function formatElapsedSeconds(startedAt: number): string {
-	const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-	return seconds < 1000 ? String(seconds).padStart(3, "0") : String(seconds);
-}
-
-function createPendingJobsWidget(tui: TUI, theme: Theme): Component & { dispose(): void } {
-	const interval = setInterval(() => tui.requestRender(), 1000);
-	return {
-		render(width: number): string[] {
-			if (width <= 0) return [];
-			return [...activeJobs.values()].map((job) => {
-				const raw = `(${formatElapsedSeconds(job.startedAt)}s) $ ${normalizeCommandForStatus(job.command)}`;
-				const line = padToWidth(truncateToWidth(raw, width, "..."), width);
-				return theme.bg("toolPendingBg", theme.fg("toolTitle", line));
-			});
-		},
-		invalidate() {},
-		dispose() {
-			clearInterval(interval);
-		},
-	};
-}
-
-function updatePendingJobsWidget() {
-	if (!currentUi) return;
-	if (activeJobs.size === 0) {
-		currentUi.setWidget("background-bash-pending", undefined);
-		return;
-	}
-	currentUi.setWidget("background-bash-pending", (tui, theme) => createPendingJobsWidget(tui, theme), { placement: "aboveEditor" });
 }
 
 function getText(result: AgentToolResult<unknown>): string {
@@ -197,6 +164,7 @@ function abortAllJobs() {
 		job.abortController.abort();
 	}
 	activeJobs.clear();
+	pendingJobs.clear();
 }
 
 function installProcessHooks() {
@@ -236,15 +204,13 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
-		currentUi = ctx.hasUI ? ctx.ui : undefined;
+		if (ctx.hasUI) pendingJobs.attach(ctx.ui);
 		restoreJobCounterFromSession(ctx);
-		updatePendingJobsWidget();
 	});
 
 	pi.on("session_shutdown", async () => {
 		abortAllJobs();
-		updatePendingJobsWidget();
-		currentUi = undefined;
+		pendingJobs.detach();
 	});
 
 	pi.registerTool({
@@ -297,7 +263,14 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				startedAt: Date.now(),
 			};
 			activeJobs.set(job.id, job);
-			updatePendingJobsWidget();
+			pendingJobs.start({
+				id: job.id,
+				text: job.command,
+				startedAt: job.startedAt,
+				details: {
+					toolCallId: job.toolCallId,
+				},
+			});
 
 			// Intentionally delegates to Pi's built-in bash tool instead of reimplementing
 			// output handling. This preserves native bash semantics: combined stdout/stderr,
@@ -333,7 +306,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				}
 
 				activeJobs.delete(job.id);
-				updatePendingJobsWidget();
+				pendingJobs.finish(job.id);
 				if (shuttingDown) return;
 
 				const durationMs = Date.now() - job.startedAt;
