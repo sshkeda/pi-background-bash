@@ -1,8 +1,8 @@
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { BashToolDetails, ExtensionAPI, ExtensionUIContext, Theme } from "@mariozechner/pi-coding-agent";
-import { createBashTool, createBashToolDefinition } from "@mariozechner/pi-coding-agent";
-import type { Component, TUI } from "@mariozechner/pi-tui";
-import { Box, Container, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { BashToolDetails, ExtensionAPI, ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { Component, TUI } from "@earendil-works/pi-tui";
+import { Box, Container, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { piContext } from "pi-context";
 import { Type } from "typebox";
 
@@ -303,7 +303,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			// output handling. This preserves native bash semantics: combined stdout/stderr,
 			// tail truncation, full-output temp files, "(no output)", nonzero exit text, and
 			// timeout text. If Pi bash changes, background_bash should inherit that behavior.
-			// Source: @mariozechner/pi-coding-agent/dist/core/tools/bash.js
+			// Source: @earendil-works/pi-coding-agent/dist/core/tools/bash.js
 			const bashTool = createBashTool(ctx.cwd);
 
 			void (async () => {

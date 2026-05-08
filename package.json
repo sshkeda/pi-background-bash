@@ -29,13 +29,13 @@
     "test": "npm run typecheck && node --test --test-force-exit test/*.mjs"
   },
   "peerDependencies": {
-    "@mariozechner/pi-agent-core": "*",
-    "@mariozechner/pi-coding-agent": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-agent-core": "^0.73.0",
-    "@mariozechner/pi-coding-agent": "^0.73.0",
+    "@earendil-works/pi-agent-core": "^0.73.0",
+    "@earendil-works/pi-coding-agent": "^0.73.0",
     "@types/node": "^22.0.0",
     "pi-mock": "file:../pi-mock",
     "typescript": "^5.0.0",
