@@ -80,8 +80,8 @@ Status: initial PBB runner is implemented behind `PI_BACKGROUND_BASH_RUNNER=pbb`
 - [x] background job records `pid` and `pgid`
 - [x] `pbb kill` sends a signal to the process group for PBB-runner live jobs via mailbox/abort
 - [x] grandchildren are killed; marker file is not written after kill
-- [ ] session shutdown kills the process group
-- [ ] timeout kills the process group
+- [x] session shutdown kills the process group
+- [x] timeout kills the process group
 
 ### Stale/orphan handling
 

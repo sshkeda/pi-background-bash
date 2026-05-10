@@ -468,6 +468,102 @@ test("pbb kill requests abort a live current-instance background job", async () 
   }
 });
 
+test("PBB runner preserves shell semantics, cwd, env, stdout, stderr, and nonzero style", async () => {
+  const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
+  const pbbRoot = join(cwd, "pbb");
+  const env = {
+    PI_BACKGROUND_BASH_RUNNER: "pbb",
+    PBB_ROOT: pbbRoot,
+    PI_LANE_SESSION_ID: "session-pbb-runner-semantics",
+    PI_LANE_SESSION_KEY: "session-key-pbb-runner-semantics",
+    PI_LANE_SESSION_FILE: join(cwd, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: "instance-pbb-runner-semantics",
+    PI_LANE_CURRENT_LANE: "main",
+    PBB_TEST_VAR: "runner-env-ok",
+  };
+  const mock = await createBgMock(script(
+    bg("printf 'env=%s cwd=%s pipe=' \"$PBB_TEST_VAR\" \"$(pwd)\"; printf hi | tr a-z A-Z; printf ' err-line\\n' >&2; echo redirected > out.txt; cat out.txt; exit 9"),
+    text("initial runner semantics turn"),
+    text("saw runner semantics result"),
+  ), { cwd, env });
+
+  try {
+    await mock.run("start pbb runner shell semantics command", TIMEOUT);
+    const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("runner-env-ok"), TIMEOUT);
+    const result = requestText(request);
+    assert.match(result, /env=runner-env-ok/);
+    assert.match(result, new RegExp(`cwd=${escapeRegExp(realpathSync(cwd))}`));
+    assert.match(result, /pipe=HI/);
+    assert.match(result, /err-line/);
+    assert.match(result, /redirected/);
+    assert.match(result, /Command exited with code 9/);
+    assert.match(result, /exit_code=\\?"9\\?"/);
+  } finally {
+    await mock.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("PBB runner preserves timeout style and kills process group descendants", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-runner-timeout-${process.pid}-${Date.now()}-`));
+  const marker = join(dir, "should-not-exist");
+  const env = {
+    PI_BACKGROUND_BASH_RUNNER: "pbb",
+    PBB_ROOT: join(dir, "pbb"),
+    PI_LANE_SESSION_ID: "session-pbb-runner-timeout",
+    PI_LANE_SESSION_KEY: "session-key-pbb-runner-timeout",
+    PI_LANE_SESSION_FILE: join(dir, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: "instance-pbb-runner-timeout",
+    PI_LANE_CURRENT_LANE: "main",
+  };
+  const mock = await createBgMock(script(
+    bg(`sh -c 'sleep 2; echo survived > ${JSON.stringify(marker)}'`, 1),
+    text("initial runner timeout turn"),
+    text("saw runner timeout result"),
+  ), { env });
+
+  try {
+    await mock.run("start pbb runner timed command", TIMEOUT);
+    const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("Command timed out after 1 seconds"), TIMEOUT);
+    const result = requestText(request);
+    assert.match(result, /outcome=\\?"timeout\\?"/);
+    assert.doesNotMatch(result, /exit_code=/);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await mock.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PBB runner session shutdown kills process group descendants", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-runner-shutdown-${process.pid}-${Date.now()}-`));
+  const marker = join(dir, "should-not-exist");
+  const env = {
+    PI_BACKGROUND_BASH_RUNNER: "pbb",
+    PBB_ROOT: join(dir, "pbb"),
+    PI_LANE_SESSION_ID: "session-pbb-runner-shutdown",
+    PI_LANE_SESSION_KEY: "session-key-pbb-runner-shutdown",
+    PI_LANE_SESSION_FILE: join(dir, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: "instance-pbb-runner-shutdown",
+    PI_LANE_CURRENT_LANE: "main",
+  };
+  const mock = await createBgMock(script(
+    bg(`sh -c 'sleep 2; echo survived > ${JSON.stringify(marker)}'`),
+    text("started runner shutdown job"),
+  ), { env });
+
+  try {
+    await mock.run("start pbb runner long command", TIMEOUT);
+  } finally {
+    await mock.close();
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.equal(existsSync(marker), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("PBB runner records pid/pgid and pbb kill terminates the process group", async () => {
   const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-runner-${process.pid}-${Date.now()}-`));
   const pbbRoot = join(dir, "pbb");
