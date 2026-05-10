@@ -1,6 +1,6 @@
 {
   "name": "pi-background-bash",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Pi extension that makes long-running bash commands async with background:true and automatic 30s backgrounding.",
   "type": "module",
   "keywords": [
