@@ -2,10 +2,12 @@
 
 Async/background `bash` for [Pi](https://github.com/earendil-works/pi): keep using the normal `bash` tool, but long-running commands stop blocking the agent.
 
-`pi-background-bash` overrides Pi's built-in `bash` tool with two quality-of-life features:
+`pi-background-bash` replaces Pi's bash execution with the PBB runner and adds two quality-of-life features:
 
 - `background: true` starts a command in the background immediately.
 - normal foreground commands automatically move to the background after 30 seconds.
+
+As of v1, PBB-owned execution is the baseline: jobs are recorded with logs plus `pid`/`pgid`, and full output is available through `pbb tail`.
 
 When a background command finishes, the extension injects a follow-up result into the session and wakes the agent.
 
@@ -65,7 +67,11 @@ Completion results arrive as Pi context messages:
 </pi_context>
 ```
 
-The result body delegates to Pi's native `bash` implementation, so output formatting matches normal Pi bash behavior: combined stdout/stderr, tail truncation, full-output temp files, nonzero exit handling, timeout handling, and native bash rendering.
+Commands run through the PBB-owned bash runner (`bash -lc`) so background jobs have recorded `pid`/`pgid` and can be killed as process groups. Verbose completion messages are truncated in-session with a `pbb tail <job> --full` hint; the full output is kept in the PBB log. See [`docs/pbb-runner.md`](docs/pbb-runner.md) for the v1 runner contract.
+
+## v1 migration
+
+v1 is a hard migration to PBB-owned execution. The old native-runner compatibility path and `PI_BACKGROUND_BASH_RUNNER` switch are gone. If you depended on exact pre-v1 bash formatting, update callers to use `pbb tail <job> --full` for complete output and the recorded PBB job metadata for process control.
 
 ## `pbb` CLI
 
@@ -93,7 +99,7 @@ Background job state is stored under:
 
 `pbb list` and `pbb status` show owner liveness through the `pil` CLI from `pi-lane` when available, so stale/disconnected owners are visible instead of silently confused with the current runtime.
 
-`pbb kill` writes a kill request into the owning instance mailbox. A live `pi-background-bash` runtime polls that mailbox and aborts the matching in-process job. For experimental process-group control, set `PI_BACKGROUND_BASH_RUNNER=pbb` before starting Pi; explicit `background: true` jobs then record `pid`/`pgid`, and `pbb kill --stale --instance <id> <job>` can signal a stale recorded process group.
+`pbb kill` writes a kill request into the owning instance mailbox. A live `pi-background-bash` runtime polls that mailbox and aborts the matching in-process job. Jobs record `pid`/`pgid`, so the runtime kills the full process group. If the owner is stale, `pbb kill --stale --instance <id> <job>` can signal the recorded process group explicitly.
 
 ## Configuration
 
