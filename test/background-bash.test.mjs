@@ -101,7 +101,7 @@ test("bash override returns normal results before the auto-background threshold"
   }
 });
 
-test("bash override preserves native shell semantics, cwd, environment, redirects, pipes, and subshells", async () => {
+test("bash override preserves shell semantics, cwd, environment, redirects, pipes, and subshells", async () => {
   const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
   const mock = await createBgMock(script(
     sh("printf 'env=%s cwd=%s pipe=' \"$PBB_TEST_VAR\" \"$(pwd)\"; printf hi | tr a-z A-Z; printf ' redirect='; echo redirected > out.txt; cat out.txt; printf ' subshell='; (printf sub); set -e; true"),
@@ -226,7 +226,7 @@ test("bash background true preserves stdout, stderr, and no-output completions",
   }
 });
 
-test("bash background true preserves Pi bash nonzero-exit body style", async () => {
+test("bash background true reports nonzero exits", async () => {
   const mock = await createBgMock(script(
     bg("echo bad; exit 7"),
     text("initial turn complete"),
@@ -264,7 +264,7 @@ test("bash background true escapes wrapper close tags in command output", async 
   }
 });
 
-test("bash background true preserves Pi bash timeout body style and omits exit_code", async () => {
+test("bash background true reports timeouts and omits exit_code", async () => {
   const mock = await createBgMock(script(
     bg("sleep 5", 1),
     text("initial turn complete"),
@@ -468,11 +468,10 @@ test("pbb kill requests abort a live current-instance background job", async () 
   }
 });
 
-test("PBB runner preserves shell semantics, cwd, env, stdout, stderr, and nonzero style", async () => {
+test("default PBB runner preserves shell semantics, cwd, env, stdout, stderr, and nonzero style", async () => {
   const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
   const pbbRoot = join(cwd, "pbb");
   const env = {
-    PI_BACKGROUND_BASH_RUNNER: "pbb",
     PBB_ROOT: pbbRoot,
     PI_LANE_SESSION_ID: "session-pbb-runner-semantics",
     PI_LANE_SESSION_KEY: "session-key-pbb-runner-semantics",
@@ -504,11 +503,10 @@ test("PBB runner preserves shell semantics, cwd, env, stdout, stderr, and nonzer
   }
 });
 
-test("PBB runner preserves timeout style and kills process group descendants", async () => {
+test("default PBB runner preserves timeout style and kills process group descendants", async () => {
   const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-runner-timeout-${process.pid}-${Date.now()}-`));
   const marker = join(dir, "should-not-exist");
   const env = {
-    PI_BACKGROUND_BASH_RUNNER: "pbb",
     PBB_ROOT: join(dir, "pbb"),
     PI_LANE_SESSION_ID: "session-pbb-runner-timeout",
     PI_LANE_SESSION_KEY: "session-key-pbb-runner-timeout",
@@ -536,11 +534,10 @@ test("PBB runner preserves timeout style and kills process group descendants", a
   }
 });
 
-test("PBB runner session shutdown kills process group descendants", async () => {
+test("default PBB runner session shutdown kills process group descendants", async () => {
   const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-runner-shutdown-${process.pid}-${Date.now()}-`));
   const marker = join(dir, "should-not-exist");
   const env = {
-    PI_BACKGROUND_BASH_RUNNER: "pbb",
     PBB_ROOT: join(dir, "pbb"),
     PI_LANE_SESSION_ID: "session-pbb-runner-shutdown",
     PI_LANE_SESSION_KEY: "session-key-pbb-runner-shutdown",
@@ -564,12 +561,11 @@ test("PBB runner session shutdown kills process group descendants", async () => 
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("PBB runner records pid/pgid and pbb kill terminates the process group", async () => {
+test("default PBB runner records pid/pgid and pbb kill terminates the process group", async () => {
   const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-runner-${process.pid}-${Date.now()}-`));
   const pbbRoot = join(dir, "pbb");
   const marker = join(dir, "should-not-exist");
   const env = {
-    PI_BACKGROUND_BASH_RUNNER: "pbb",
     PBB_ROOT: pbbRoot,
     PI_LANE_SESSION_ID: "session-pbb-runner-test",
     PI_LANE_SESSION_KEY: "session-key-pbb-runner-test",
@@ -727,7 +723,7 @@ test("bash background true kills active jobs when the session closes", async () 
   assert.equal(existsSync(marker), false, "background job should be killed on session close");
 });
 
-test("bash background true uses Pi bash truncation suffix", async () => {
+test("bash background true truncates verbose PBB results with a pbb tail hint", async () => {
   const mock = await createBgMock(script(
     bg("python3 - <<'PY'\nfor i in range(2105): print(f'line {i}')\nPY"),
     text("initial turn complete"),
@@ -738,8 +734,9 @@ test("bash background true uses Pi bash truncation suffix", async () => {
     await mock.run("start a verbose background command", TIMEOUT);
     const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("<pi_context"), TIMEOUT);
     const textReq = backgroundResultText(request);
-    assert.match(textReq, /Showing lines \d+-\d+ of \d+\. Full output:/);
+    assert.match(textReq, /Showing last 2000 of \d+ lines\. Full output: pbb tail bg_1 --full/);
     assert.match(textReq, /line 2104/);
+    assert.doesNotMatch(textReq, /line 0\nline 1\nline 2/);
   } finally {
     await mock.close();
   }

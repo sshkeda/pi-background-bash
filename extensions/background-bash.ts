@@ -5,13 +5,15 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { AgentToolUpdateCallback, BashToolDetails, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { createPiPending } from "pi-pending";
 import { piContext } from "pi-context";
 import { Type } from "typebox";
 
 const MAX_ACTIVE_JOBS = 10;
+const MAX_RESULT_LINES = 2000;
+const MAX_RESULT_BYTES = 50 * 1024;
 const DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS = 30;
 const CUSTOM_TYPE = "background_bash_result";
 
@@ -82,7 +84,7 @@ type ActiveJob = {
 	child?: ChildProcess;
 	pid?: number;
 	pgid?: number;
-	runner?: "native" | "pbb";
+	runner?: "pbb";
 };
 
 type BackgroundBashConfig = {
@@ -126,14 +128,6 @@ function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function detectOutcomeAndExitCode(body: string): { outcome: Outcome; exitCode: number | null } {
-	const exitMatch = body.match(/(?:^|\n)Command exited with code (\d+)$/);
-	if (exitMatch) return { outcome: "exit", exitCode: Number(exitMatch[1]) };
-	if (/(?:^|\n)Command timed out after [^\n]+ seconds$/.test(body)) return { outcome: "timeout", exitCode: null };
-	if (/(?:^|\n)Command aborted$/.test(body)) return { outcome: "abort", exitCode: null };
-	return { outcome: "error", exitCode: null };
-}
-
 function readConfigFile(path: string): BackgroundBashConfig {
 	try {
 		if (!existsSync(path)) return {};
@@ -154,10 +148,6 @@ function getAutoBackgroundAfterSeconds(cwd?: string): number {
 
 function formatThreshold(seconds: number): string {
 	return Number.isInteger(seconds) ? `${seconds}s` : `${seconds.toFixed(1)}s`;
-}
-
-function usePbbRunner(): boolean {
-	return process.env.PI_BACKGROUND_BASH_RUNNER === "pbb";
 }
 
 function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
@@ -383,36 +373,16 @@ function rethrowBashError(completed: Extract<CompletedBashRun, { status: "error"
 	throw completed.error instanceof Error ? completed.error : new Error(String(completed.error));
 }
 
-async function runNativeBash(
-	cwd: string,
-	toolCallId: string,
-	params: BashParams,
-	signal: AbortSignal | undefined,
-	onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
-): Promise<CompletedBashRun> {
-	const bashTool = createBashTool(cwd);
-	let latestDetails: BashToolDetails | undefined;
-
-	try {
-		const result = (await bashTool.execute(toolCallId, params, signal, (update) => {
-			latestDetails = update.details as BashToolDetails | undefined;
-			onUpdate?.(update as AgentToolResult<BashToolDetails>);
-		})) as AgentToolResult<BashToolDetails>;
-		const body = getText(result);
-		latestDetails = result.details ?? latestDetails;
-		return { status: "success", result, body, details: latestDetails, outcome: "exit", exitCode: 0 };
-	} catch (error) {
-		const body = error instanceof Error ? error.message : String(error);
-		const detected = detectOutcomeAndExitCode(body);
-		return { status: "error", error, body, details: latestDetails, outcome: detected.outcome, exitCode: detected.exitCode };
-	}
-}
-
 function completionBody(output: string, suffix: string): string {
 	return output ? `${output.replace(/\s*$/, "")}\n\n${suffix}` : suffix;
 }
 
-async function runPbbBash(job: ActiveJob, cwd: string, params: BashParams): Promise<CompletedBashRun> {
+async function runPbbBash(
+	job: ActiveJob,
+	cwd: string,
+	params: BashParams,
+	onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
+): Promise<CompletedBashRun> {
 	job.runner = "pbb";
 	return new Promise((resolve) => {
 		let output = "";
@@ -441,6 +411,8 @@ async function runPbbBash(job: ActiveJob, cwd: string, params: BashParams): Prom
 
 		const append = (chunk: Buffer) => {
 			output += chunk.toString("utf8");
+			const text = output.replace(/\s*$/, "");
+			onUpdate?.({ content: text ? [{ type: "text", text }] : [], details: {} as BashToolDetails });
 			appendPbbLogDelta(job, output);
 		};
 		child.stdout.on("data", append);
@@ -494,8 +466,22 @@ async function runPbbBash(job: ActiveJob, cwd: string, params: BashParams): Prom
 	});
 }
 
+function truncateBackgroundBody(job: ActiveJob, body: string): string {
+	const bytes = Buffer.byteLength(body, "utf8");
+	const lines = body.split("\n");
+	if (bytes <= MAX_RESULT_BYTES && lines.length <= MAX_RESULT_LINES) return body;
+
+	let kept = lines.slice(-MAX_RESULT_LINES).join("\n");
+	while (Buffer.byteLength(kept, "utf8") > MAX_RESULT_BYTES && kept.length > 0) {
+		kept = kept.slice(Math.ceil(kept.length / 10));
+	}
+	const lineSummary = lines.length > MAX_RESULT_LINES ? `last ${Math.min(MAX_RESULT_LINES, lines.length)} of ${lines.length} lines` : `${lines.length} lines`;
+	const byteSummary = bytes > MAX_RESULT_BYTES ? `, capped at ${MAX_RESULT_BYTES} bytes` : "";
+	const fullOutputHint = job.pbb ? `pbb tail ${job.id} --full` : "the pbb job log";
+	return `[Showing ${lineSummary}${byteSummary}. Full output: ${fullOutputHint}]\n\n${kept}`;
+}
+
 function buildXmlResult(job: ActiveJob, outcome: Outcome, exitCode: number | null, durationMs: number, body: string): string {
-	// Raw body is intentional: it is exactly the text Pi's native bash tool produced.
 	// pi-context only escapes closing wrapper tags so command output cannot
 	// prematurely close the XML-ish context envelope.
 	return piContext({
@@ -527,7 +513,8 @@ function deliverBackgroundResult(pi: ExtensionAPI, job: ActiveJob, completed: Co
 
 	const durationMs = Date.now() - job.startedAt;
 	recordPbbJobCompleted(job, completed, cwd, durationMs);
-	const content = buildXmlResult(job, completed.outcome, completed.exitCode, durationMs, completed.body);
+	const body = truncateBackgroundBody(job, completed.body);
+	const content = buildXmlResult(job, completed.outcome, completed.exitCode, durationMs, body);
 	const details: BackgroundBashDetails = {
 		...(completed.details ?? {}),
 		jobId: job.id,
@@ -537,7 +524,7 @@ function deliverBackgroundResult(pi: ExtensionAPI, job: ActiveJob, completed: Co
 		toolCallId: job.toolCallId,
 		startedAt: new Date(job.startedAt).toISOString(),
 		durationMs,
-		body: completed.body,
+		body,
 		cwd,
 		...(job.pbb
 			? {
@@ -559,19 +546,6 @@ function deliverBackgroundResult(pi: ExtensionAPI, job: ActiveJob, completed: Co
 			details,
 		},
 		{ deliverAs: "followUp", triggerTurn: true },
-	);
-}
-
-function stripBashInlineTruncationNotice(body: string, details: BackgroundBashDetails | undefined): string {
-	// Pi's bash execute() includes a human-readable truncation suffix in the text
-	// returned to the model, while Pi's native renderResult() also renders the
-	// same information from details.truncation/fullOutputPath. For display, let
-	// the native renderer own that metadata so background_bash does not show the
-	// full-output path twice. Keep message.content/body unchanged for LLM context.
-	if (!details?.fullOutputPath && !details?.truncation?.truncated) return body;
-	return body.replace(
-		/\n\n\[Showing (?:last [^\]\n]+ of line \d+ \(line is [^)]+\)|lines \d+-\d+ of \d+(?: \([^)]+ limit\))?)\. Full output: [^\]\n]+\](?=\n\nCommand (?:exited|timed out|aborted)|$)/,
-		"",
 	);
 }
 
@@ -614,7 +588,7 @@ function renderNativeBashResult(command: string, body: string, details: Backgrou
 	const call = bash.renderCall?.({ command }, theme, renderContext(undefined));
 	if (call) box.addChild(call);
 	const result = bash.renderResult?.(
-		{ content: [{ type: "text", text: stripBashInlineTruncationNotice(body, details) }], details },
+		{ content: [{ type: "text", text: body }], details },
 		{ expanded, isPartial: false },
 		theme,
 		renderContext(undefined),
@@ -675,7 +649,7 @@ function restoreJobCounterFromSession(ctx: { sessionManager?: { getEntries?: () 
 	for (const entry of entries as Array<Record<string, unknown>>) {
 		const details = entry.details as Record<string, unknown> | undefined;
 		const content = typeof entry.content === "string" ? entry.content : undefined;
-		const candidates = [details?.jobId, content?.match(/<pi_context\b[^>]*\bid="bg_(\d+)"/)?.[1], content?.match(/Background bash job bg_(\d+)/)?.[1]];
+		const candidates = [details?.jobId, content?.match(/<pi_context\b[^>]*\bid="bg_(\d+)"/)?.[1]];
 		for (const candidate of candidates) {
 			if (typeof candidate !== "string") continue;
 			const match = candidate.match(/^bg_(\d+)$/) ?? candidate.match(/^(\d+)$/);
@@ -714,7 +688,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated using Pi's native bash limits. Set background: true to run immediately in the background and get a job id. Otherwise, if the command is still running after the configured auto-background threshold (${formatThreshold(DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS)} by default), it is automatically moved to the background; a <pi_context source="pi-background-bash" kind="background_bash_result"> message is injected when it finishes. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Verbose background results are truncated with the full output available through pbb tail. Set background: true to run immediately in the background and get a job id. Otherwise, if the command is still running after the configured auto-background threshold (${formatThreshold(DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS)} by default), it is automatically moved to the background; a <pi_context source="pi-background-bash" kind="background_bash_result"> message is injected when it finishes. Optionally provide a timeout in seconds.`,
 		promptSnippet: `Execute bash commands (ls, grep, find, etc.); timeout is in seconds. Set background: true for long-running non-interactive commands. Commands still running after the configured auto-background threshold (${formatThreshold(DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS)} by default) automatically move to background and wake you with a pi-background-bash result when finished.`,
 		promptGuidelines: [
 			"Use bash with background: true for long-running non-interactive commands such as builds, full test suites, dev servers, watchers, deploys, downloads, or commands you do not need before the next step.",
@@ -745,7 +719,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 					startedAt: Date.now(),
 					cwd: ctx.cwd,
 					pbb: pbbIdentity(ctx),
-					runner: usePbbRunner() ? "pbb" : "native",
+					runner: "pbb",
 				};
 				activeJobs.set(job.id, job);
 				recordPbbJobStarted(job, ctx.cwd);
@@ -756,11 +730,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 					details: { toolCallId: job.toolCallId },
 				});
 
-				const completedPromise = usePbbRunner()
-					? runPbbBash(job, ctx.cwd, params)
-					: runNativeBash(ctx.cwd, toolCallId, params, job.abortController.signal, (update) => {
-							appendPbbLogDelta(job, getText(update));
-						});
+				const completedPromise = runPbbBash(job, ctx.cwd, params);
 				void completedPromise.then((completed) => {
 					deliverBackgroundResult(pi, job, completed, ctx.cwd);
 				});
@@ -772,9 +742,26 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			}
 
 			if (autoAfterSeconds <= 0) {
-				const completed = await runNativeBash(ctx.cwd, toolCallId, params, signal, onUpdate);
-				if (completed.status === "success") return completed.result;
-				rethrowBashError(completed);
+				const job: ActiveJob = {
+					id: `fg_${toolCallId}`,
+					command: params.command,
+					toolCallId,
+					abortController: new AbortController(),
+					startedAt: Date.now(),
+					runner: "pbb",
+				};
+				activeJobs.set(job.id, job);
+				const forwardAbort = () => job.abortController.abort();
+				if (signal?.aborted) forwardAbort();
+				else signal?.addEventListener("abort", forwardAbort, { once: true });
+				try {
+					const completed = await runPbbBash(job, ctx.cwd, params, onUpdate);
+					if (completed.status === "success") return completed.result;
+					rethrowBashError(completed);
+				} finally {
+					signal?.removeEventListener("abort", forwardAbort);
+					activeJobs.delete(job.id);
+				}
 			}
 
 			if (activeJobs.size >= MAX_ACTIVE_JOBS) {
@@ -799,9 +786,10 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			if (signal?.aborted) forwardAbort();
 			else signal?.addEventListener("abort", forwardAbort, { once: true });
 
-			const completedPromise = runNativeBash(ctx.cwd, toolCallId, params, job.abortController.signal, (update) => {
-				if (backgrounded) appendPbbLogDelta(job, getText(update));
-				else onUpdate?.(update);
+			let latestBody = "";
+			const completedPromise = runPbbBash(job, ctx.cwd, params, (update) => {
+				latestBody = getText(update);
+				if (!backgrounded) onUpdate?.(update);
 			});
 
 			const winner = await Promise.race([completedPromise, waitForBackgroundThreshold(autoAfterSeconds)]);
@@ -820,6 +808,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			job.pbb = pbbIdentity(ctx);
 			activeJobs.set(job.id, job);
 			recordPbbJobStarted(job, ctx.cwd);
+			appendPbbLogDelta(job, latestBody);
 			pendingJobs.start({
 				id: job.id,
 				text: job.command,
