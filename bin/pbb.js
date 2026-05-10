@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -105,25 +106,41 @@ function readJson(path) {
   }
 }
 
-function laneInstancePath(id, instanceId, job) {
-  const laneRoot = id.laneRoot || job?.laneRoot;
-  if (!laneRoot || !id.sessionKey || !instanceId) return undefined;
-  return join(laneRoot, "sessions", id.sessionKey, "instances", `${instanceId}.json`);
+let pilInstancesCache;
+
+function readPilInstances(id) {
+  if (pilInstancesCache !== undefined) return pilInstancesCache;
+  const pilBin = process.env.PBB_PIL_BIN || "pil";
+  try {
+    const raw = execFileSync(pilBin, ["instances", "--json"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      env: {
+        ...process.env,
+        PI_LANE_ROOT: id.laneRoot || process.env.PI_LANE_ROOT || "",
+        PI_LANE_SESSION_KEY: id.sessionKey,
+        PI_LANE_SESSION_ID: id.sessionId,
+        PI_LANE_SESSION_FILE: id.sessionFile,
+        PI_LANE_INSTANCE_ID: id.instanceId,
+        PI_LANE_CURRENT_LANE: id.lane,
+      },
+    });
+    pilInstancesCache = JSON.parse(raw).instances || [];
+  } catch {
+    pilInstancesCache = null;
+  }
+  return pilInstancesCache;
 }
 
 function ownerInfo(id, job) {
-  const path = laneInstancePath(id, job.instanceId, job);
-  const state = path ? readJson(path) : undefined;
-  const staleMs = Number(process.env.PBB_INSTANCE_STALE_MS || 15_000);
-  const lastSeenAt = state?.lastSeenAt || state?.updatedAt;
-  const ageMs = lastSeenAt ? Date.now() - Date.parse(lastSeenAt) : undefined;
-  const live = Boolean(state && state.status !== "disconnected" && ageMs !== undefined && Number.isFinite(ageMs) && ageMs <= staleMs);
+  const instances = readPilInstances(id);
+  const state = Array.isArray(instances) ? instances.find((item) => item.instanceId === job.instanceId) : undefined;
   return {
     ownerStatus: state?.status || "unknown",
-    ownerLastSeenAt: lastSeenAt || "",
-    ownerLastSeenAgeMs: ageMs,
-    ownerLive: live,
-    ownerStale: !live,
+    ownerLastSeenAt: state?.lastSeenAt || "",
+    ownerLastSeenAgeMs: state?.lastSeenAgeMs,
+    ownerLive: Boolean(state?.live),
+    ownerStale: !state?.live,
   };
 }
 
@@ -213,12 +230,12 @@ function formatJob(job) {
 
 function printInstances(id, opts) {
   const scope = opts.scope || "session";
-  const instances = listInstanceIds(id, scope, opts.instance).map((instanceId) => {
-    const fakeJob = { instanceId, laneRoot: id.laneRoot };
-    return { instanceId, ...ownerInfo(id, fakeJob) };
-  });
-  if (opts.json) return console.log(json({ kind: "pbb.instances", schemaVersion: SCHEMA_VERSION, sessionId: id.sessionId, sessionKey: id.sessionKey, instanceId: id.instanceId, lane: id.lane, scope, instances }));
-  console.log(context("pbb.instances", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, instances: instances.length }, `<summary>${instances.length} instances</summary>\n${instances.map((item) => `- instance=${item.instanceId} live=${item.ownerLive} status=${item.ownerStatus} last_seen=${item.ownerLastSeenAt || "unknown"}`).join("\n") || "No instances in scope."}`));
+  const pilInstances = readPilInstances(id);
+  const instances = Array.isArray(pilInstances)
+    ? pilInstances.map((item) => ({ instanceId: item.instanceId, ownerLive: Boolean(item.live), ownerStatus: item.status || "unknown", ownerLastSeenAt: item.lastSeenAt || "", lane: item.lane || "" }))
+    : listInstanceIds(id, scope, opts.instance).map((instanceId) => ({ instanceId, ownerLive: false, ownerStatus: "unknown", ownerLastSeenAt: "", lane: "" }));
+  if (opts.json) return console.log(json({ kind: "pbb.instances", schemaVersion: SCHEMA_VERSION, sessionId: id.sessionId, sessionKey: id.sessionKey, instanceId: id.instanceId, lane: id.lane, scope, source: Array.isArray(pilInstances) ? "pil" : "pbb", instances }));
+  console.log(context("pbb.instances", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, source: Array.isArray(pilInstances) ? "pil" : "pbb", instances: instances.length }, `<summary>${instances.length} instances</summary>\n${instances.map((item) => `- instance=${item.instanceId} live=${item.ownerLive} status=${item.ownerStatus} lane=${item.lane || ""} last_seen=${item.ownerLastSeenAt || "unknown"}`).join("\n") || "No instances in scope."}`));
 }
 
 function printList(id, opts) {

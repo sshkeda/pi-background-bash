@@ -37,7 +37,7 @@ pbb status --instance <instance_id> <job_id>
 pbb tail --instance <instance_id> <job_id>
 ```
 
-If owner liveness is shown as stale/disconnected, do not assume cooperative kill worked. For experimental PBB-runner jobs with a recorded `pgid`, stale process-group kill requires explicit intent:
+PBB reads lane/runtime liveness from `pil` when available. If owner liveness is shown as stale/disconnected, do not assume cooperative kill worked. For experimental PBB-runner jobs with a recorded `pgid`, stale process-group kill requires explicit intent:
 
 ```bash
 pbb kill --instance <instance_id> --stale <job_id>

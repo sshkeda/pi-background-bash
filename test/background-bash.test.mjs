@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 
 const EXT = new URL("../extensions/background-bash.ts", import.meta.url).pathname;
 const PBB_CLI = new URL("../bin/pbb.js", import.meta.url).pathname;
+const PIL_CLI = "/Users/sshkeda/gh/pi-lane/bin/pil.js";
 const TIMEOUT = 45_000;
 
 const bg = (command, timeout) =>
@@ -380,7 +381,7 @@ test("pbb shows pi-lane owner liveness and stale status", () => {
   writeFileSync(join(laneBase, "stale.json"), JSON.stringify({ instanceId: "stale", status: "disconnected", lastSeenAt: "2000-01-01T00:00:00.000Z" }));
 
   try {
-    const env = { ...process.env, PBB_ROOT: pbbRoot, PI_LANE_ROOT: laneRoot, PI_LANE_SESSION_KEY: key, PI_LANE_SESSION_ID: "live-session", PI_LANE_INSTANCE_ID: "current", PI_LANE_CURRENT_LANE: "main" };
+    const env = { ...process.env, PBB_PIL_BIN: PIL_CLI, PBB_ROOT: pbbRoot, PI_LANE_ROOT: laneRoot, PI_LANE_SESSION_KEY: key, PI_LANE_SESSION_ID: "live-session", PI_LANE_INSTANCE_ID: "current", PI_LANE_CURRENT_LANE: "main" };
     const current = execFileSync(process.execPath, [PBB_CLI, "list"], { env, encoding: "utf8" });
     assert.match(current, /owner=live/);
     const session = execFileSync(process.execPath, [PBB_CLI, "list", "--scope", "session"], { env, encoding: "utf8" });
