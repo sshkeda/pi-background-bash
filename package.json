@@ -25,9 +25,15 @@
   "exports": {
     ".": "./extensions/background-bash.ts"
   },
+  "bin": {
+    "pbb": "./bin/pbb.js"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {
@@ -53,6 +59,9 @@
   "files": [
     "index.ts",
     "extensions/background-bash.ts",
+    "bin/pbb.js",
+    "docs",
+    "skills",
     "README.md",
     "LICENSE"
   ],

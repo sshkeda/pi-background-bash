@@ -67,6 +67,32 @@ Completion results arrive as Pi context messages:
 
 The result body delegates to Pi's native `bash` implementation, so output formatting matches normal Pi bash behavior: combined stdout/stderr, tail truncation, full-output temp files, nonzero exit handling, timeout handling, and native bash rendering.
 
+## `pbb` CLI
+
+This package also installs `pbb`, a small inspector for background bash jobs.
+
+```bash
+pbb self
+pbb list
+pbb status bg_1
+pbb tail bg_1 -n 80
+pbb kill bg_1
+```
+
+`pbb` is designed for agents: output is wrapped in compact `pi_context` envelopes and always includes session/instance identity. When [`pi-lane`](https://github.com/sshkeda/pi-lane) is installed, `pbb` uses its runtime identity env vars (`PI_LANE_SESSION_KEY`, `PI_LANE_INSTANCE_ID`, etc.) and defaults to the current live Pi instance, not every terminal attached to the same session.
+
+Background job state is stored under:
+
+```text
+~/.pi/pbb/sessions/{sessionKey}/instances/{instanceId}/
+  identity.json
+  jobs/{jobId}.json
+  events.jsonl
+  logs/{jobId}.log
+```
+
+`pbb kill` writes a kill request into the owning instance mailbox. A live `pi-background-bash` runtime polls that mailbox and aborts the matching in-process job; if the owner is stale or disconnected, the request remains visible for debugging.
+
 ## Configuration
 
 Default auto-background threshold: `30` seconds.
@@ -96,6 +122,7 @@ The extension updates the `bash` tool metadata exposed to models:
 - the `background` boolean is part of the tool schema
 - the tool description documents automatic backgrounding
 - prompt snippets/guidelines teach the agent not to retry just to wait
+- prompt guidelines teach the agent to use `pbb list/status/tail` for inspection
 - background completion messages are described as final bash results
 
 No global Pi prompt patch is required.
