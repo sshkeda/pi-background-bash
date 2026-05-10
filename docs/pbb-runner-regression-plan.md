@@ -73,35 +73,36 @@ Already covered by existing tests:
 
 ## PBB-owned runner-specific tests
 
-Only required once the PBB runner exists.
+Status: initial PBB runner is implemented behind `PI_BACKGROUND_BASH_RUNNER=pbb` for explicit `background: true` jobs. The native runner remains default.
 
 ### Process groups
 
-- background job records `pid` and `pgid`
-- `pbb kill` sends a signal to the process group, not just the shell process
-- grandchildren are killed; marker file is not written after kill
-- session shutdown kills the process group
-- timeout kills the process group
+- [x] background job records `pid` and `pgid`
+- [x] `pbb kill` sends a signal to the process group for PBB-runner live jobs via mailbox/abort
+- [x] grandchildren are killed; marker file is not written after kill
+- [ ] session shutdown kills the process group
+- [ ] timeout kills the process group
 
 ### Stale/orphan handling
 
-- if owner instance heartbeat is stale but `pgid` is alive, `pbb kill --stale` can kill it explicitly
-- stale kill requires explicit flag; default kill should not unexpectedly kill another instance's job
-- pid/pgid reuse is guarded by started-at/process metadata where practical
+- [x] if owner instance heartbeat is stale but `pgid` is alive, `pbb kill --stale` can kill it explicitly
+- [x] stale kill requires explicit flag; default kill should not unexpectedly kill another instance's job
+- [ ] pid/pgid reuse is guarded by started-at/process metadata where practical
 
 ### Signal semantics
 
-- default `pbb kill` sends TERM first
-- optional escalation to KILL works
-- `--signal INT|TERM|KILL` is recorded in events
-- killed jobs record `status=killed` or `outcome=abort` consistently
+- [x] default `pbb kill` sends TERM first
+- [ ] optional escalation to KILL works
+- [x] `--signal INT|TERM|KILL` is accepted for CLI stale kill requests
+- [ ] `--signal INT|TERM|KILL` is recorded in events for all kill paths
+- [x] killed live PBB-runner jobs record `outcome=abort` consistently
 
 ### CLI safety
 
-- default scope is current instance
-- ambiguous job ids across instances fail loudly
-- cross-instance kill requires `--instance` or explicit global job id
-- stale owner warnings are visible in `pbb list/status`
+- [x] default scope is current instance
+- [x] ambiguous job ids across instances fail loudly
+- [x] cross-instance kill requires `--instance` or explicit global job id
+- [x] stale owner warnings are visible in `pbb list/status`
 
 ## Acceptance gate
 

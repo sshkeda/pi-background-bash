@@ -29,8 +29,21 @@ function context(kind, attrs, body) {
   return `<pi_context ${renderedAttrs}>\n${escapeBody(body)}\n</pi_context>`;
 }
 
+function stripInternal(value) {
+  if (Array.isArray(value)) return value.map(stripInternal);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key.startsWith("_")) continue;
+      out[key] = stripInternal(item);
+    }
+    return out;
+  }
+  return value;
+}
+
 function json(value) {
-  return JSON.stringify(value, null, 2);
+  return JSON.stringify(stripInternal(value), null, 2);
 }
 
 function identity() {
@@ -92,6 +105,32 @@ function readJson(path) {
   }
 }
 
+function laneInstancePath(id, instanceId, job) {
+  const laneRoot = id.laneRoot || job?.laneRoot;
+  if (!laneRoot || !id.sessionKey || !instanceId) return undefined;
+  return join(laneRoot, "sessions", id.sessionKey, "instances", `${instanceId}.json`);
+}
+
+function ownerInfo(id, job) {
+  const path = laneInstancePath(id, job.instanceId, job);
+  const state = path ? readJson(path) : undefined;
+  const staleMs = Number(process.env.PBB_INSTANCE_STALE_MS || 15_000);
+  const lastSeenAt = state?.lastSeenAt || state?.updatedAt;
+  const ageMs = lastSeenAt ? Date.now() - Date.parse(lastSeenAt) : undefined;
+  const live = Boolean(state && state.status !== "disconnected" && ageMs !== undefined && Number.isFinite(ageMs) && ageMs <= staleMs);
+  return {
+    ownerStatus: state?.status || "unknown",
+    ownerLastSeenAt: lastSeenAt || "",
+    ownerLastSeenAgeMs: ageMs,
+    ownerLive: live,
+    ownerStale: !live,
+  };
+}
+
+function enrichJob(id, job, path) {
+  return { ...job, ...ownerInfo(id, job), _path: path };
+}
+
 function listInstanceIds(id, scope, explicitInstance) {
   if (explicitInstance) return [explicitInstance];
   if (scope === "current-instance") return [id.instanceId];
@@ -107,8 +146,9 @@ function readJobs(id, { scope = "current-instance", instance } = {}) {
     if (!existsSync(dir)) continue;
     for (const item of readdirSync(dir)) {
       if (!item.endsWith(".json")) continue;
-      const job = readJson(join(dir, item));
-      if (job) jobs.push(job);
+      const path = join(dir, item);
+      const job = readJson(path);
+      if (job) jobs.push(enrichJob(id, job, path));
     }
   }
   return jobs.sort((a, b) => String(a.startedAt ?? "").localeCompare(String(b.startedAt ?? "")) || String(a.jobId).localeCompare(String(b.jobId)));
@@ -132,6 +172,7 @@ function parseArgs(argv) {
     else if (arg === "--since" || arg === "--cursor") out.since = argv[++i];
     else if (arg === "--lines" || arg === "-n") out.lines = Number(argv[++i]);
     else if (arg === "--signal") out.signal = argv[++i];
+    else if (arg === "--stale") out.stale = true;
     else out._.push(arg);
   }
   return out;
@@ -165,7 +206,19 @@ function printSelf(id, opts) {
 function formatJob(job) {
   const age = job.startedAt ? `${Math.max(0, Math.round((Date.now() - Date.parse(job.startedAt)) / 1000))}s` : "?";
   const exit = job.exitCode === undefined || job.exitCode === null ? "" : ` exit=${job.exitCode}`;
-  return `- job=${job.jobId} global=${job.globalJobId} status=${job.status}${exit} age=${age} instance=${job.instanceId} cmd=${JSON.stringify(job.command ?? "")}`;
+  const owner = job.ownerLive ? "owner=live" : `owner=stale status=${job.ownerStatus || "unknown"}`;
+  const pgid = job.pgid ? ` pgid=${job.pgid}` : "";
+  return `- job=${job.jobId} global=${job.globalJobId} status=${job.status}${exit} age=${age} instance=${job.instanceId} ${owner}${pgid} cmd=${JSON.stringify(job.command ?? "")}`;
+}
+
+function printInstances(id, opts) {
+  const scope = opts.scope || "session";
+  const instances = listInstanceIds(id, scope, opts.instance).map((instanceId) => {
+    const fakeJob = { instanceId, laneRoot: id.laneRoot };
+    return { instanceId, ...ownerInfo(id, fakeJob) };
+  });
+  if (opts.json) return console.log(json({ kind: "pbb.instances", schemaVersion: SCHEMA_VERSION, sessionId: id.sessionId, sessionKey: id.sessionKey, instanceId: id.instanceId, lane: id.lane, scope, instances }));
+  console.log(context("pbb.instances", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, instances: instances.length }, `<summary>${instances.length} instances</summary>\n${instances.map((item) => `- instance=${item.instanceId} live=${item.ownerLive} status=${item.ownerStatus} last_seen=${item.ownerLastSeenAt || "unknown"}`).join("\n") || "No instances in scope."}`));
 }
 
 function printList(id, opts) {
@@ -224,6 +277,26 @@ function printTail(id, jobId, opts) {
   console.log(context("pbb.tail", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status, cursor: job.lastEventId, lines: opts.full ? "full" : (opts.lines || DEFAULT_TAIL_LINES) }, `<summary>${job.jobId} ${job.status}; showing ${opts.full ? "full log" : `last ${opts.lines || DEFAULT_TAIL_LINES} lines`}</summary>\n${body || "No log output recorded yet."}`));
 }
 
+function normalizeSignal(signal) {
+  const value = String(signal || "TERM").toUpperCase();
+  return value.startsWith("SIG") ? value : `SIG${value}`;
+}
+
+function signalProcessGroup(pgid, signal) {
+  const normalized = normalizeSignal(signal);
+  try {
+    process.kill(-pgid, normalized);
+    return { ok: true };
+  } catch (error) {
+    try {
+      process.kill(pgid, normalized);
+      return { ok: true };
+    } catch (fallbackError) {
+      return { ok: false, error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError) };
+    }
+  }
+}
+
 function printKill(id, jobId, opts) {
   const scope = opts.scope || (opts.instance ? "session" : "current-instance");
   const result = findJob(id, jobId, { scope, instance: opts.instance });
@@ -236,6 +309,15 @@ function printKill(id, jobId, opts) {
     console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status }, `<summary>${job.jobId} is not running; no kill requested</summary>`));
     return;
   }
+  const signal = opts.signal || "TERM";
+  if (opts.stale && job.ownerStale && job.pgid) {
+    const sent = signalProcessGroup(Number(job.pgid), signal);
+    const { _path, ...jobWithoutInternal } = job;
+    const patch = { ...jobWithoutInternal, status: sent.ok ? "kill_requested" : job.status, staleKillRequestedAt: new Date().toISOString(), staleKillSignal: signal, staleKillError: sent.error };
+    if (job._path) writeJsonFile(job._path, patch);
+    console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, signal, stale: true, pgid: job.pgid, ok: sent.ok }, `<summary>${sent.ok ? "stale process-group kill sent" : "stale process-group kill failed"} for ${job.jobId}</summary>\n${sent.error || ""}`));
+    process.exit(sent.ok ? 0 : 4);
+  }
   const requestId = `kill_${Date.now()}_${randomUUID().slice(0, 8)}`;
   const request = {
     schemaVersion: SCHEMA_VERSION,
@@ -247,11 +329,12 @@ function printKill(id, jobId, opts) {
     sessionKey: id.sessionKey,
     instanceId: job.instanceId,
     requestedByInstanceId: id.instanceId,
-    signal: opts.signal || "TERM",
+    signal,
     requestedAt: new Date().toISOString(),
   };
   writeJsonFile(join(requestsDir(id, job.instanceId), `${requestId}.json`), request);
-  console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, request_id: requestId, status: job.status }, `<summary>kill requested for ${job.jobId}</summary>\nThe owning pi-background-bash runtime will abort the job if it is still live.`));
+  const warning = job.ownerStale ? `\nOwner instance appears stale. Cooperative kill is queued but may not be honored. If this is a PBB-runner job with pgid, use: pbb kill ${job.jobId} --instance ${job.instanceId} --stale` : "";
+  console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, request_id: requestId, status: job.status, owner_live: job.ownerLive }, `<summary>kill requested for ${job.jobId}</summary>\nThe owning pi-background-bash runtime will abort the job if it is still live.${warning}`));
 }
 
 const opts = parseArgs(process.argv.slice(2));
@@ -259,7 +342,7 @@ const command = opts._[0] || "list";
 const id = identity();
 
 if (["help", "--help", "-h"].includes(command)) {
-  console.log(`pbb - Pi background bash inspector\n\nCommands:\n  pbb self [--json]\n  pbb list [--scope current-instance|session] [--instance ID] [--json]\n  pbb status [JOB] [--json]\n  pbb tail JOB [-n LINES] [--full] [--json]\n  pbb kill JOB\n\nDefaults to the current pi-lane instance using PI_LANE_* env vars.`);
+  console.log(`pbb - Pi background bash inspector\n\nCommands:\n  pbb self [--json]\n  pbb list [--scope current-instance|session] [--instance ID] [--json]\n  pbb instances [--json]\n  pbb status [JOB] [--json]\n  pbb tail JOB [-n LINES] [--full] [--json]\n  pbb kill JOB [--stale] [--signal TERM]\n\nDefaults to the current pi-lane instance using PI_LANE_* env vars.`);
   process.exit(0);
 }
 
@@ -272,6 +355,7 @@ requireIdentity(id);
 mkdirSync(instanceDir(id), { recursive: true });
 
 if (command === "list" || command === "ls") printList(id, opts);
+else if (command === "instances") printInstances(id, opts);
 else if (command === "status") printStatus(id, opts._[1], opts);
 else if (command === "tail") {
   if (!opts._[1]) {

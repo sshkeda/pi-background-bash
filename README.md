@@ -91,7 +91,9 @@ Background job state is stored under:
   logs/{jobId}.log
 ```
 
-`pbb kill` writes a kill request into the owning instance mailbox. A live `pi-background-bash` runtime polls that mailbox and aborts the matching in-process job; if the owner is stale or disconnected, the request remains visible for debugging.
+`pbb list` and `pbb status` show owner liveness when `pi-lane` heartbeat files are available, so stale/disconnected owners are visible instead of silently confused with the current runtime.
+
+`pbb kill` writes a kill request into the owning instance mailbox. A live `pi-background-bash` runtime polls that mailbox and aborts the matching in-process job. For experimental process-group control, set `PI_BACKGROUND_BASH_RUNNER=pbb` before starting Pi; explicit `background: true` jobs then record `pid`/`pgid`, and `pbb kill --stale --instance <id> <job>` can signal a stale recorded process group.
 
 ## Configuration
 

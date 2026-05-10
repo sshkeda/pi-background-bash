@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMock, script, text, toolCall } from "pi-mock";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -364,6 +364,36 @@ test("pbb CLI defaults to current instance and requires explicit scope for other
   }
 });
 
+test("pbb shows pi-lane owner liveness and stale status", () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-live-${process.pid}-${Date.now()}-`));
+  const pbbRoot = join(dir, "pbb");
+  const laneRoot = join(dir, "lane");
+  const key = "live-key";
+  const pbbBase = join(pbbRoot, "sessions", key, "instances");
+  const laneBase = join(laneRoot, "sessions", key, "instances");
+  mkdirSync(join(pbbBase, "current", "jobs"), { recursive: true });
+  mkdirSync(join(pbbBase, "stale", "jobs"), { recursive: true });
+  mkdirSync(laneBase, { recursive: true });
+  writeFileSync(join(pbbBase, "current", "jobs", "bg_1.json"), JSON.stringify({ jobId: "bg_1", globalJobId: "current:bg_1", status: "running", command: "live", startedAt: new Date().toISOString(), instanceId: "current", laneRoot }));
+  writeFileSync(join(pbbBase, "stale", "jobs", "bg_1.json"), JSON.stringify({ jobId: "bg_1", globalJobId: "stale:bg_1", status: "running", command: "stale", startedAt: new Date().toISOString(), instanceId: "stale", laneRoot }));
+  writeFileSync(join(laneBase, "current.json"), JSON.stringify({ instanceId: "current", status: "idle", lastSeenAt: new Date().toISOString() }));
+  writeFileSync(join(laneBase, "stale.json"), JSON.stringify({ instanceId: "stale", status: "disconnected", lastSeenAt: "2000-01-01T00:00:00.000Z" }));
+
+  try {
+    const env = { ...process.env, PBB_ROOT: pbbRoot, PI_LANE_ROOT: laneRoot, PI_LANE_SESSION_KEY: key, PI_LANE_SESSION_ID: "live-session", PI_LANE_INSTANCE_ID: "current", PI_LANE_CURRENT_LANE: "main" };
+    const current = execFileSync(process.execPath, [PBB_CLI, "list"], { env, encoding: "utf8" });
+    assert.match(current, /owner=live/);
+    const session = execFileSync(process.execPath, [PBB_CLI, "list", "--scope", "session"], { env, encoding: "utf8" });
+    assert.match(session, /owner=live/);
+    assert.match(session, /owner=stale/);
+    const instances = execFileSync(process.execPath, [PBB_CLI, "instances"], { env, encoding: "utf8" });
+    assert.match(instances, /instance=current live=true/);
+    assert.match(instances, /instance=stale live=false/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("pbb lists and tails current pi-lane instance background jobs", async () => {
   const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-${process.pid}-${Date.now()}-`));
   const pbbRoot = join(dir, "pbb");
@@ -433,6 +463,74 @@ test("pbb kill requests abort a live current-instance background job", async () 
     assert.equal(existsSync(marker), false);
   } finally {
     await mock.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PBB runner records pid/pgid and pbb kill terminates the process group", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-runner-${process.pid}-${Date.now()}-`));
+  const pbbRoot = join(dir, "pbb");
+  const marker = join(dir, "should-not-exist");
+  const env = {
+    PI_BACKGROUND_BASH_RUNNER: "pbb",
+    PBB_ROOT: pbbRoot,
+    PI_LANE_SESSION_ID: "session-pbb-runner-test",
+    PI_LANE_SESSION_KEY: "session-key-pbb-runner-test",
+    PI_LANE_SESSION_FILE: join(dir, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: "instance-pbb-runner-test",
+    PI_LANE_CURRENT_LANE: "main",
+  };
+
+  const mock = await createBgMock(script(
+    bg(`sh -c 'sleep 5; echo survived > ${JSON.stringify(marker)}'`),
+    sh(`node ${JSON.stringify(PBB_CLI)} kill bg_1`),
+    text("requested runner kill"),
+    text("saw runner abort"),
+  ), { env });
+
+  try {
+    const events = await mock.run("start and kill a pbb-runner background command", TIMEOUT);
+    assert.match(JSON.stringify(events), /kill requested for bg_1/);
+    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-runner-test", "instances", "instance-pbb-runner-test", "jobs", "bg_1.json");
+    await waitForCondition(() => existsSync(jobPath) && JSON.parse(readFileSync(jobPath, "utf8")).outcome === "abort");
+    const job = JSON.parse(readFileSync(jobPath, "utf8"));
+    assert.equal(job.runner, "pbb");
+    assert.equal(typeof job.pid, "number");
+    assert.equal(typeof job.pgid, "number");
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await mock.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pbb kill --stale can signal a recorded stale process group", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-stale-${process.pid}-${Date.now()}-`));
+  const pbbRoot = join(dir, "pbb");
+  const marker = join(dir, "should-not-exist");
+  const key = "stale-kill-key";
+  const instance = "stale-owner";
+  const jobDir = join(pbbRoot, "sessions", key, "instances", instance, "jobs");
+  mkdirSync(jobDir, { recursive: true });
+  const child = spawn("bash", ["-lc", `sleep 5; echo survived > ${JSON.stringify(marker)}`], { detached: true, stdio: "ignore" });
+  child.unref();
+
+  try {
+    writeFileSync(join(jobDir, "bg_stale.json"), JSON.stringify({ jobId: "bg_stale", globalJobId: `${instance}:bg_stale`, status: "running", command: "stale", startedAt: new Date().toISOString(), instanceId: instance, runner: "pbb", pid: child.pid, pgid: child.pid }));
+    const env = { ...process.env, PBB_ROOT: pbbRoot, PI_LANE_SESSION_KEY: key, PI_LANE_SESSION_ID: "stale-session", PI_LANE_INSTANCE_ID: "current" };
+    const out = execFileSync(process.execPath, [PBB_CLI, "kill", "bg_stale", "--instance", instance, "--stale"], { env, encoding: "utf8" });
+    assert.match(out, /stale process-group kill sent/);
+    await waitForCondition(() => {
+      try {
+        process.kill(child.pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    }, 5_000);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
     rmSync(dir, { recursive: true, force: true });
   }
 });

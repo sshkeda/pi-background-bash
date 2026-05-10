@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -78,6 +79,10 @@ type ActiveJob = {
 	pbb?: PbbIdentity;
 	lastLoggedBody?: string;
 	lastEventId?: number;
+	child?: ChildProcess;
+	pid?: number;
+	pgid?: number;
+	runner?: "native" | "pbb";
 };
 
 type BackgroundBashConfig = {
@@ -149,6 +154,23 @@ function getAutoBackgroundAfterSeconds(cwd?: string): number {
 
 function formatThreshold(seconds: number): string {
 	return Number.isInteger(seconds) ? `${seconds}s` : `${seconds.toFixed(1)}s`;
+}
+
+function usePbbRunner(): boolean {
+	return process.env.PI_BACKGROUND_BASH_RUNNER === "pbb";
+}
+
+function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
+	if (!pid) return;
+	try {
+		process.kill(-pid, signal);
+	} catch {
+		try {
+			process.kill(pid, signal);
+		} catch {
+			// Best effort: process may have already exited.
+		}
+	}
 }
 
 function stableSessionKey(sessionFile: string, sessionId?: string): string {
@@ -279,7 +301,9 @@ function writePbbJob(job: ActiveJob, patch: Record<string, unknown> = {}): void 
 		instanceId: job.pbb.instanceId,
 		lane: job.pbb.lane,
 		laneRoot: job.pbb.laneRoot,
-		pid: process.pid,
+		pid: job.pid ?? process.pid,
+		pgid: job.pgid,
+		runner: job.runner,
 		logPath: join(pbbLogsDir(job.pbb), `${job.id}.log`),
 		lastEventId: job.lastEventId,
 		...patch,
@@ -382,6 +406,92 @@ async function runNativeBash(
 		const detected = detectOutcomeAndExitCode(body);
 		return { status: "error", error, body, details: latestDetails, outcome: detected.outcome, exitCode: detected.exitCode };
 	}
+}
+
+function completionBody(output: string, suffix: string): string {
+	return output ? `${output.replace(/\s*$/, "")}\n\n${suffix}` : suffix;
+}
+
+async function runPbbBash(job: ActiveJob, cwd: string, params: BashParams): Promise<CompletedBashRun> {
+	job.runner = "pbb";
+	return new Promise((resolve) => {
+		let output = "";
+		let settled = false;
+		let timedOut = false;
+		let aborted = false;
+		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+		const finish = (completed: CompletedBashRun) => {
+			if (settled) return;
+			settled = true;
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			resolve(completed);
+		};
+
+		const child = spawn("bash", ["-lc", params.command], {
+			cwd,
+			env: process.env,
+			detached: true,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		job.child = child;
+		job.pid = child.pid;
+		job.pgid = child.pid;
+		writePbbJob(job, { pid: child.pid, pgid: child.pid, runner: "pbb" });
+
+		const append = (chunk: Buffer) => {
+			output += chunk.toString("utf8");
+			appendPbbLogDelta(job, output);
+		};
+		child.stdout.on("data", append);
+		child.stderr.on("data", append);
+
+		const abort = () => {
+			aborted = true;
+			killProcessGroup(child.pid, "SIGTERM");
+			setTimeout(() => {
+				if (!settled) killProcessGroup(child.pid, "SIGKILL");
+			}, 500).unref?.();
+		};
+		if (job.abortController.signal.aborted) abort();
+		else job.abortController.signal.addEventListener("abort", abort, { once: true });
+
+		if (params.timeout && params.timeout > 0) {
+			timeoutHandle = setTimeout(() => {
+				timedOut = true;
+				killProcessGroup(child.pid, "SIGTERM");
+				setTimeout(() => {
+					if (!settled) killProcessGroup(child.pid, "SIGKILL");
+				}, 500).unref?.();
+			}, params.timeout * 1000);
+			timeoutHandle.unref?.();
+		}
+
+		child.on("error", (error) => {
+			finish({ status: "error", error, body: error.message, details: undefined, outcome: "error", exitCode: null });
+		});
+
+		child.on("close", (code, signalName) => {
+			if (timedOut) {
+				const body = completionBody(output, `Command timed out after ${params.timeout} seconds`);
+				finish({ status: "error", error: new Error(body), body, details: undefined, outcome: "timeout", exitCode: null });
+				return;
+			}
+			if (aborted || signalName) {
+				const body = completionBody(output, "Command aborted");
+				finish({ status: "error", error: new Error(body), body, details: undefined, outcome: "abort", exitCode: null });
+				return;
+			}
+			if (code === 0) {
+				const result: AgentToolResult<BashToolDetails> = { content: output ? [{ type: "text", text: output.replace(/\s*$/, "") }] : [], details: {} as BashToolDetails };
+				finish({ status: "success", result, body: getText(result), details: result.details, outcome: "exit", exitCode: 0 });
+				return;
+			}
+			const exitCode = code ?? 1;
+			const body = completionBody(output, `Command exited with code ${exitCode}`);
+			finish({ status: "error", error: new Error(body), body, details: undefined, outcome: "exit", exitCode });
+		});
+	});
 }
 
 function buildXmlResult(job: ActiveJob, outcome: Outcome, exitCode: number | null, durationMs: number, body: string): string {
@@ -544,6 +654,7 @@ function abortAllJobs() {
 	killRequestTimer = undefined;
 	for (const job of activeJobs.values()) {
 		job.abortController.abort();
+		if (job.runner === "pbb") killProcessGroup(job.pgid ?? job.pid, "SIGTERM");
 	}
 	activeJobs.clear();
 	pendingJobs.clear();
@@ -634,6 +745,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 					startedAt: Date.now(),
 					cwd: ctx.cwd,
 					pbb: pbbIdentity(ctx),
+					runner: usePbbRunner() ? "pbb" : "native",
 				};
 				activeJobs.set(job.id, job);
 				recordPbbJobStarted(job, ctx.cwd);
@@ -644,9 +756,12 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 					details: { toolCallId: job.toolCallId },
 				});
 
-				void runNativeBash(ctx.cwd, toolCallId, params, job.abortController.signal, (update) => {
-					appendPbbLogDelta(job, getText(update));
-				}).then((completed) => {
+				const completedPromise = usePbbRunner()
+					? runPbbBash(job, ctx.cwd, params)
+					: runNativeBash(ctx.cwd, toolCallId, params, job.abortController.signal, (update) => {
+							appendPbbLogDelta(job, getText(update));
+						});
+				void completedPromise.then((completed) => {
 					deliverBackgroundResult(pi, job, completed, ctx.cwd);
 				});
 

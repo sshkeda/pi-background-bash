@@ -32,8 +32,15 @@ Use broader scopes only intentionally:
 
 ```bash
 pbb list --scope session
+pbb instances
 pbb status --instance <instance_id> <job_id>
 pbb tail --instance <instance_id> <job_id>
+```
+
+If owner liveness is shown as stale/disconnected, do not assume cooperative kill worked. For experimental PBB-runner jobs with a recorded `pgid`, stale process-group kill requires explicit intent:
+
+```bash
+pbb kill --instance <instance_id> --stale <job_id>
 ```
 
 ## Agent guidelines
@@ -42,4 +49,5 @@ pbb tail --instance <instance_id> <job_id>
 - Use `pbb tail <job>` for bounded output instead of rerunning the command.
 - Treat `pbb` output as authoritative for session/instance/job identity.
 - If a job is ambiguous or belongs to another instance, ask before operating on it.
-- `pbb kill` is intentionally conservative; same-instance control is safest.
+- `pbb kill` is intentionally conservative; same-instance live-runtime control is safest.
+- Treat `owner=stale` as a warning that the owning Pi runtime may not honor mailbox requests.
