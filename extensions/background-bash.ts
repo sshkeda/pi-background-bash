@@ -71,6 +71,16 @@ type PbbIdentity = {
 	root: string;
 };
 
+type RepairableSessionManager = {
+	getEntries?: () => unknown[];
+	getSessionFile?: () => string | undefined;
+};
+
+type RepairableSessionContext = {
+	sessionManager?: RepairableSessionManager;
+	isIdle?: () => boolean;
+};
+
 type ActiveJob = {
 	id: string;
 	command: string;
@@ -86,6 +96,7 @@ type ActiveJob = {
 	pgid?: number;
 	runner?: "pbb";
 	killSignal?: NodeJS.Signals;
+	repairContext?: RepairableSessionContext;
 };
 
 type BackgroundBashConfig = {
@@ -203,6 +214,138 @@ function pbbIdentity(ctx: { sessionManager?: { getSessionId?: () => string | und
 		laneRoot: process.env.PI_LANE_ROOT,
 		root: process.env.PBB_ROOT || join(homedir(), ".pi", "pbb"),
 	};
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function entryParentId(entry: unknown): string | null | undefined {
+	const record = asRecord(entry);
+	const parentId = record?.parentId;
+	return typeof parentId === "string" || parentId === null ? parentId : undefined;
+}
+
+function entryId(entry: unknown): string | undefined {
+	const id = asRecord(entry)?.id;
+	return typeof id === "string" ? id : undefined;
+}
+
+function entryHasToolCall(entry: unknown, toolCallId: string): boolean {
+	const record = asRecord(entry);
+	if (record?.type !== "message") return false;
+	const message = asRecord(record.message);
+	if (message?.role !== "assistant") return false;
+	const content = Array.isArray(message.content) ? message.content : [];
+	return content.some((part) => {
+		const item = asRecord(part);
+		return item?.type === "toolCall" && item.name === "bash" && item.id === toolCallId;
+	});
+}
+
+function backgroundToolResultCallId(entry: unknown): string | undefined {
+	const record = asRecord(entry);
+	if (record?.type !== "message") return undefined;
+	const message = asRecord(record.message);
+	if (message?.role !== "toolResult" || message.toolName !== "bash") return undefined;
+	const details = asRecord(message.details);
+	if (typeof details?.jobId !== "string") return undefined;
+	const detailToolCallId = details.toolCallId;
+	if (typeof detailToolCallId === "string") return detailToolCallId;
+	return typeof message.toolCallId === "string" ? message.toolCallId : undefined;
+}
+
+function parentChainHasToolCall(entry: unknown, byId: Map<string, unknown>, toolCallId: string): boolean {
+	const seen = new Set<string>();
+	let parentId = entryParentId(entry);
+	while (parentId) {
+		if (seen.has(parentId)) return false;
+		seen.add(parentId);
+		const parent = byId.get(parentId);
+		if (!parent) return false;
+		if (entryHasToolCall(parent, toolCallId)) return true;
+		parentId = entryParentId(parent);
+	}
+	return false;
+}
+
+function findAssistantToolCallParent(entries: unknown[], beforeIndex: number, toolCallId: string): string | undefined {
+	for (let i = beforeIndex - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entryHasToolCall(entry, toolCallId)) return entryId(entry);
+	}
+	return undefined;
+}
+
+function collectDetachedBackgroundToolResultRepairs(entries: unknown[], onlyToolCallId?: string): Map<string, string> {
+	const byId = new Map<string, unknown>();
+	for (const entry of entries) {
+		const id = entryId(entry);
+		if (id) byId.set(id, entry);
+	}
+
+	const repairs = new Map<string, string>();
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		const id = entryId(entry);
+		const toolCallId = backgroundToolResultCallId(entry);
+		if (!id || !toolCallId || (onlyToolCallId && toolCallId !== onlyToolCallId)) continue;
+		if (parentChainHasToolCall(entry, byId, toolCallId)) continue;
+		const parentId = findAssistantToolCallParent(entries, i, toolCallId);
+		if (parentId) repairs.set(id, parentId);
+	}
+	return repairs;
+}
+
+function rewriteSessionParentIds(sessionFile: string | undefined, repairs: Map<string, string>): void {
+	if (!sessionFile || repairs.size === 0 || !existsSync(sessionFile)) return;
+	try {
+		const lines = readFileSync(sessionFile, "utf8").split("\n");
+		let changed = false;
+		const next = lines.map((line) => {
+			if (!line.trim()) return line;
+			try {
+				const entry = JSON.parse(line) as Record<string, unknown>;
+				const id = typeof entry.id === "string" ? entry.id : undefined;
+				const parentId = id ? repairs.get(id) : undefined;
+				if (!parentId || entry.parentId === parentId) return line;
+				entry.parentId = parentId;
+				changed = true;
+				return JSON.stringify(entry);
+			} catch {
+				return line;
+			}
+		});
+		if (!changed) return;
+		const tmp = `${sessionFile}.${process.pid}.${Date.now()}.repair.tmp`;
+		writeFileSync(tmp, next.join("\n"));
+		renameSync(tmp, sessionFile);
+	} catch {
+		// Best effort. The in-memory repair still protects the active request.
+	}
+}
+
+function repairDetachedBackgroundToolResults(ctx: RepairableSessionContext | undefined, onlyToolCallId?: string, options: { rewriteFile?: boolean } = {}): number {
+	const sessionManager = ctx?.sessionManager;
+	const entries = sessionManager?.getEntries?.();
+	if (!entries?.length) return 0;
+	const repairs = collectDetachedBackgroundToolResultRepairs(entries, onlyToolCallId);
+	for (const entry of entries) {
+		const id = entryId(entry);
+		const parentId = id ? repairs.get(id) : undefined;
+		if (parentId) (entry as { parentId?: string }).parentId = parentId;
+	}
+	if (options.rewriteFile !== false) rewriteSessionParentIds(sessionManager?.getSessionFile?.(), repairs);
+	return repairs.size;
+}
+
+function scheduleDetachedBackgroundToolResultRepair(ctx: RepairableSessionContext, toolCallId: string): void {
+	for (const delayMs of [25, 250, 1000]) {
+		const handle = setTimeout(() => {
+			repairDetachedBackgroundToolResults(ctx, toolCallId, { rewriteFile: ctx.isIdle?.() === true });
+		}, delayMs);
+		handle.unref?.();
+	}
 }
 
 function pbbSessionDir(id: PbbIdentity): string {
@@ -391,8 +534,9 @@ function waitForBackgroundThreshold(seconds: number): Promise<"background"> {
 	});
 }
 
-function rethrowBashError(completed: Extract<CompletedBashRun, { status: "error" }>): never {
-	throw completed.error instanceof Error ? completed.error : new Error(String(completed.error));
+function rethrowBashError(completed: Extract<CompletedBashRun, { status: "error" }>, job?: ActiveJob): never {
+	const body = truncateForegroundBody(job, completed.body);
+	throw new Error(body || (completed.error instanceof Error ? completed.error.message : String(completed.error)));
 }
 
 function completionBody(output: string, suffix: string): string {
@@ -433,7 +577,7 @@ async function runPbbBash(
 
 		const append = (chunk: Buffer) => {
 			output += chunk.toString("utf8");
-			const text = output.replace(/\s*$/, "");
+			const text = truncateLiveBody(output.replace(/\s*$/, ""));
 			onUpdate?.({ content: text ? [{ type: "text", text }] : [], details: {} as BashToolDetails });
 			appendPbbLogDelta(job, output);
 		};
@@ -488,7 +632,11 @@ async function runPbbBash(
 	});
 }
 
-function truncateBackgroundBody(job: ActiveJob, body: string): string {
+function shouldTruncateBody(body: string): boolean {
+	return Buffer.byteLength(body, "utf8") > MAX_RESULT_BYTES || body.split("\n").length > MAX_RESULT_LINES;
+}
+
+function truncateBodyWithHint(body: string, fullOutputHint: string): string {
 	const bytes = Buffer.byteLength(body, "utf8");
 	const lines = body.split("\n");
 	if (bytes <= MAX_RESULT_BYTES && lines.length <= MAX_RESULT_LINES) return body;
@@ -499,8 +647,36 @@ function truncateBackgroundBody(job: ActiveJob, body: string): string {
 	}
 	const lineSummary = lines.length > MAX_RESULT_LINES ? `last ${Math.min(MAX_RESULT_LINES, lines.length)} of ${lines.length} lines` : `${lines.length} lines`;
 	const byteSummary = bytes > MAX_RESULT_BYTES ? `, capped at ${MAX_RESULT_BYTES} bytes` : "";
-	const fullOutputHint = job.pbb ? `pbb tail ${job.id} --full` : "the pbb job log";
 	return `[Showing ${lineSummary}${byteSummary}. Full output: ${fullOutputHint}]\n\n${kept}`;
+}
+
+function writeForegroundFullOutput(body: string): string {
+	const dir = join(homedir(), ".pi", "pbb", "truncated");
+	mkdirSync(dir, { recursive: true });
+	const path = join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.log`);
+	writeFileSync(path, body);
+	return path;
+}
+
+function truncateForegroundBody(job: ActiveJob | undefined, body: string): string {
+	if (!shouldTruncateBody(body)) return body;
+	const fullOutputHint = job?.pbb ? `pbb tail ${job.id} --full` : writeForegroundFullOutput(body);
+	return truncateBodyWithHint(body, fullOutputHint);
+}
+
+function truncateLiveBody(body: string): string {
+	if (!shouldTruncateBody(body)) return body;
+	return truncateBodyWithHint(body, "final tool result/full-output snapshot");
+}
+
+function truncateBackgroundBody(job: ActiveJob, body: string): string {
+	const fullOutputHint = job.pbb ? `pbb tail ${job.id} --full` : writeForegroundFullOutput(body);
+	return truncateBodyWithHint(body, fullOutputHint);
+}
+
+function truncateForegroundResult(job: ActiveJob, completed: Extract<CompletedBashRun, { status: "success" }>): AgentToolResult<BashToolDetails> {
+	const body = truncateForegroundBody(job, completed.body);
+	return { content: body ? [{ type: "text", text: body }] : [], details: completed.result.details };
 }
 
 function buildXmlResult(job: ActiveJob, outcome: Outcome, exitCode: number | null, durationMs: number, body: string): string {
@@ -532,6 +708,8 @@ function deliverBackgroundResult(pi: ExtensionAPI, job: ActiveJob, completed: Co
 	activeJobs.delete(job.id);
 	pendingJobs.finish(job.id);
 	if (shuttingDown) return;
+
+	repairDetachedBackgroundToolResults(job.repairContext, job.toolCallId, { rewriteFile: job.repairContext?.isIdle?.() === true });
 
 	const durationMs = Date.now() - job.startedAt;
 	recordPbbJobCompleted(job, completed, cwd, durationMs);
@@ -699,6 +877,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 		killRequestTimer.unref?.();
 		if (ctx.hasUI) pendingJobs.attach(ctx.ui);
 		restoreJobCounterFromSession(ctx);
+		repairDetachedBackgroundToolResults(ctx, undefined, { rewriteFile: true });
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -741,6 +920,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 					cwd: ctx.cwd,
 					pbb: pbbIdentity(ctx),
 					runner: "pbb",
+					repairContext: ctx,
 				};
 				activeJobs.set(job.id, job);
 				recordPbbJobStarted(job, ctx.cwd);
@@ -755,6 +935,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				void completedPromise.then((completed) => {
 					deliverBackgroundResult(pi, job, completed, ctx.cwd);
 				});
+				scheduleDetachedBackgroundToolResultRepair(ctx, toolCallId);
 
 				return {
 					content: [{ type: "text", text: `Bash job ${job.id} started in background. Use pbb status ${job.id} or pbb tail ${job.id} to inspect it.` }],
@@ -777,8 +958,8 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				else signal?.addEventListener("abort", forwardAbort, { once: true });
 				try {
 					const completed = await runPbbBash(job, ctx.cwd, params, onUpdate);
-					if (completed.status === "success") return completed.result;
-					rethrowBashError(completed);
+					if (completed.status === "success") return truncateForegroundResult(job, completed);
+					rethrowBashError(completed, job);
 				} finally {
 					signal?.removeEventListener("abort", forwardAbort);
 					activeJobs.delete(job.id);
@@ -797,6 +978,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				toolCallId,
 				abortController: new AbortController(),
 				startedAt: Date.now(),
+				repairContext: ctx,
 			};
 			activeJobs.set(job.id, job);
 
@@ -817,8 +999,8 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			if (winner !== "background") {
 				signal?.removeEventListener("abort", forwardAbort);
 				activeJobs.delete(job.id);
-				if (winner.status === "success") return winner.result;
-				rethrowBashError(winner);
+				if (winner.status === "success") return truncateForegroundResult(job, winner);
+				rethrowBashError(winner, job);
 			}
 
 			backgrounded = true;
@@ -840,6 +1022,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			void completedPromise.then((completed) => {
 				deliverBackgroundResult(pi, job, completed, ctx.cwd);
 			});
+			scheduleDetachedBackgroundToolResultRepair(ctx, toolCallId);
 
 			return {
 				content: [{ type: "text", text: `Bash job ${job.id} moved to background after ${formatThreshold(autoAfterSeconds)}. Use pbb status ${job.id} or pbb tail ${job.id} to inspect it.` }],

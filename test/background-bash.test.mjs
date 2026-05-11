@@ -101,6 +101,27 @@ test("bash override returns normal results before the auto-background threshold"
   }
 });
 
+test("bash override truncates verbose foreground results before they enter model context", async () => {
+  const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
+  const command = "python3 - <<'PY'\nfor i in range(10000):\n    print(f'VERBOSE_LINE_{i:05d} ' + 'x' * 80)\nPY";
+  const mock = await createBgMock(script(
+    sh(command),
+    text("saw truncated foreground result"),
+  ), { cwd });
+
+  try {
+    await mock.run("run a verbose quick bash command", TIMEOUT);
+    const request = requestText(mock.requests.at(-1));
+    assert.match(request, /Full output: \/.*\.log/);
+    assert.match(request, /VERBOSE_LINE_09999/);
+    assert.doesNotMatch(request, /VERBOSE_LINE_00000/);
+    assert.ok(request.length < 180_000, `foreground result sent to the model was not capped enough (${request.length} chars)`);
+  } finally {
+    await mock.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("bash override preserves shell semantics, cwd, environment, redirects, pipes, and subshells", async () => {
   const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
   const mock = await createBgMock(script(
@@ -725,6 +746,76 @@ test("pbb kill --stale can signal a recorded stale process group", async () => {
     assert.equal(existsSync(marker), false);
   } finally {
     try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("session start repairs detached background bash tool results before replay", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-repair-${process.pid}-${Date.now()}-`));
+  const sessionFile = join(dir, "session.jsonl");
+  const now = new Date().toISOString();
+  const toolCallId = "call_pbbRepair123|fc_pbbRepair456";
+  const entries = [
+    { type: "session", version: 3, id: "repair-session", timestamp: now, cwd: dir },
+    {
+      type: "message",
+      id: "user-root",
+      parentId: null,
+      timestamp: now,
+      message: { role: "user", content: [{ type: "text", text: "start background command" }], timestamp: Date.now() },
+    },
+    {
+      type: "message",
+      id: "assistant-call",
+      parentId: "user-root",
+      timestamp: now,
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "sleep 60" } }],
+        stopReason: "toolUse",
+        provider: "faux",
+        api: "faux",
+        model: "faux",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        timestamp: Date.now(),
+      },
+    },
+    {
+      type: "message",
+      id: "detached-result",
+      parentId: null,
+      timestamp: now,
+      message: {
+        role: "toolResult",
+        toolCallId,
+        toolName: "bash",
+        content: [{ type: "text", text: "Bash job bg001 moved to background after 30s." }],
+        details: { jobId: "bg001", command: "sleep 60", outcome: "running", exitCode: null, toolCallId },
+        timestamp: Date.now(),
+      },
+    },
+    {
+      type: "message",
+      id: "followup-user",
+      parentId: "detached-result",
+      timestamp: now,
+      message: { role: "user", content: [{ type: "text", text: "continue after background" }], timestamp: Date.now() },
+    },
+  ];
+  writeFileSync(sessionFile, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+
+  const mock = await createBgMock(script(
+    text("repaired detached background result"),
+  ), { sessionFile, cwd: dir });
+
+  try {
+    await mock.run("continue after repair", TIMEOUT);
+    const repaired = readSessionEntries(sessionFile).find((entry) => entry.id === "detached-result");
+    assert.equal(repaired.parentId, "assistant-call");
+    const request = requestText(mock.requests.at(-1));
+    assert.ok(request.indexOf(toolCallId) !== -1, "expected repaired tool call id to remain in model context");
+  } finally {
+    await mock.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
