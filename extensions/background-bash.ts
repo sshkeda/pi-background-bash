@@ -85,6 +85,7 @@ type ActiveJob = {
 	pid?: number;
 	pgid?: number;
 	runner?: "pbb";
+	killSignal?: NodeJS.Signals;
 };
 
 type BackgroundBashConfig = {
@@ -96,6 +97,9 @@ const schema = Type.Object({
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
 	background: Type.Optional(Type.Boolean({ description: "Run immediately in the background and return a job id" })),
 });
+
+const JOB_ID_PREFIX = "bg";
+const JOB_ID_WIDTH = 3;
 
 const activeJobs = new Map<string, ActiveJob>();
 const pendingJobs = createPiPending({
@@ -109,6 +113,22 @@ let killRequestTimer: ReturnType<typeof setInterval> | undefined;
 
 function normalizeCommandForStatus(command: string): string {
 	return command.replace(/\s+/g, " ").trim();
+}
+
+function formatJobId(n: number): string {
+	return `${JOB_ID_PREFIX}${String(n).padStart(JOB_ID_WIDTH, "0")}`;
+}
+
+function parseJobNumber(value: unknown): number | undefined {
+	if (typeof value !== "string") return undefined;
+	const match = value.match(/^bg(\d{3,})$/);
+	return match ? Number(match[1]) : undefined;
+}
+
+function normalizeSignal(value: unknown): NodeJS.Signals {
+	const raw = String(value || "TERM").toUpperCase().replace(/^SIG/, "");
+	if (["TERM", "INT", "KILL", "HUP", "QUIT"].includes(raw)) return `SIG${raw}` as NodeJS.Signals;
+	return "SIGTERM";
 }
 
 function getText(result: AgentToolResult<unknown>): string {
@@ -294,6 +314,7 @@ function writePbbJob(job: ActiveJob, patch: Record<string, unknown> = {}): void 
 		pid: job.pid ?? process.pid,
 		pgid: job.pgid,
 		runner: job.runner,
+		killSignal: job.killSignal,
 		logPath: join(pbbLogsDir(job.pbb), `${job.id}.log`),
 		lastEventId: job.lastEventId,
 		...patch,
@@ -354,8 +375,9 @@ function handlePbbKillRequests(): void {
 				continue;
 			}
 			if (request.type !== "kill" || request.jobId !== job.id) continue;
-			appendPbbEvent(job, "job.kill_requested", { requestId: request.requestId, signal: request.signal });
-			writePbbJob(job, { status: "kill_requested", killRequestedAt: new Date().toISOString(), lastEventId: job.lastEventId });
+			job.killSignal = normalizeSignal(request.signal);
+			appendPbbEvent(job, "job.kill_requested", { requestId: request.requestId, signal: job.killSignal });
+			writePbbJob(job, { status: "kill_requested", killRequestedAt: new Date().toISOString(), killSignal: job.killSignal, lastEventId: job.lastEventId });
 			job.abortController.abort();
 			rmSync(path, { force: true });
 		}
@@ -420,9 +442,9 @@ async function runPbbBash(
 
 		const abort = () => {
 			aborted = true;
-			killProcessGroup(child.pid, "SIGTERM");
+			killProcessGroup(child.pid, job.killSignal ?? "SIGTERM");
 			setTimeout(() => {
-				if (!settled) killProcessGroup(child.pid, "SIGKILL");
+				if (!settled && job.killSignal !== "SIGKILL") killProcessGroup(child.pid, "SIGKILL");
 			}, 500).unref?.();
 		};
 		if (job.abortController.signal.aborted) abort();
@@ -649,11 +671,10 @@ function restoreJobCounterFromSession(ctx: { sessionManager?: { getEntries?: () 
 	for (const entry of entries as Array<Record<string, unknown>>) {
 		const details = entry.details as Record<string, unknown> | undefined;
 		const content = typeof entry.content === "string" ? entry.content : undefined;
-		const candidates = [details?.jobId, content?.match(/<pi_context\b[^>]*\bid="bg_(\d+)"/)?.[1]];
+		const candidates = [details?.jobId, content?.match(/<pi_context\b[^>]*\bid="(bg\d{3,})"/)?.[1]];
 		for (const candidate of candidates) {
-			if (typeof candidate !== "string") continue;
-			const match = candidate.match(/^bg_(\d+)$/) ?? candidate.match(/^(\d+)$/);
-			if (match) max = Math.max(max, Number(match[1]));
+			const n = parseJobNumber(candidate);
+			if (n !== undefined) max = Math.max(max, n);
 		}
 	}
 	nextJobNumber = Math.max(nextJobNumber, max + 1);
@@ -712,7 +733,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				}
 
 				const job: ActiveJob = {
-					id: `bg_${nextJobNumber++}`,
+					id: formatJobId(nextJobNumber++),
 					command: params.command,
 					toolCallId,
 					abortController: new AbortController(),
@@ -769,7 +790,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			}
 
 			const job: ActiveJob = {
-				// Foreground bash calls should not consume visible bg_N ids unless they
+				// Foreground bash calls should not consume visible bg001 IDs unless they
 				// actually cross the threshold and become background jobs.
 				id: `auto_${toolCallId}`,
 				command: params.command,
@@ -803,7 +824,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			backgrounded = true;
 			signal?.removeEventListener("abort", forwardAbort);
 			activeJobs.delete(job.id);
-			job.id = `bg_${nextJobNumber++}`;
+			job.id = formatJobId(nextJobNumber++);
 			job.cwd = ctx.cwd;
 			job.pbb = pbbIdentity(ctx);
 			activeJobs.set(job.id, job);

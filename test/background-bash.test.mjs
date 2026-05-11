@@ -135,11 +135,11 @@ test("bash override automatically moves slow commands to background and injects 
   try {
     const events = await mock.run("run a slow bash command", TIMEOUT);
     const all = JSON.stringify(events);
-    assert.match(all, /Bash job bg_1 moved to background after 0\.1s\./);
+    assert.match(all, /Bash job bg001 moved to background after 0\.1s\./);
 
     const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("<pi_context"), TIMEOUT);
     const textReq = backgroundResultText(request);
-    assert.match(textReq, /<pi_context source="pi-background-bash" kind="background_bash_result" id="bg_1"/);
+    assert.match(textReq, /<pi_context source="pi-background-bash" kind="background_bash_result" id="bg001"/);
     assert.match(textReq, /tool_call_id="[^"]+"/);
     assert.match(textReq, /command="sleep 0\.3; echo auto-done"/);
     assert.match(textReq, /outcome="exit"/);
@@ -161,12 +161,12 @@ test("bash background true starts immediately in background and injects final re
   try {
     const events = await mock.run("run a bash command explicitly in the background", TIMEOUT);
     const all = JSON.stringify(events);
-    assert.match(all, /Bash job bg_1 started in background\./);
+    assert.match(all, /Bash job bg001 started in background\./);
     assert.doesNotMatch(all, /moved to background after/);
 
     const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("<pi_context"), TIMEOUT);
     const textReq = backgroundResultText(request);
-    assert.match(textReq, /id="bg_1"/);
+    assert.match(textReq, /id="bg001"/);
     assert.match(textReq, /command="sleep 0\.2; echo explicit-bg-done"/);
     assert.match(textReq, /explicit-bg-done/);
   } finally {
@@ -184,11 +184,11 @@ test("bash background true returns immediately, then injects completion and trig
   try {
     const events = await mock.run("start a background command", TIMEOUT);
     const all = JSON.stringify(events);
-    assert.match(all, /Bash job bg_1 started in background\./);
+    assert.match(all, /Bash job bg001 started in background\./);
 
     const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("<pi_context"), TIMEOUT);
     const textReq = backgroundResultText(request);
-    assert.match(textReq, /<pi_context source="pi-background-bash" kind="background_bash_result" id="bg_1"/);
+    assert.match(textReq, /<pi_context source="pi-background-bash" kind="background_bash_result" id="bg001"/);
     assert.match(textReq, /outcome="exit"/);
     assert.match(textReq, /exit_code="0"/);
     assert.match(textReq, /command="sleep 0\.1; echo done"/);
@@ -211,12 +211,12 @@ test("bash background true preserves stdout, stderr, and no-output completions",
   try {
     const events = await mock.run("start mixed-output and no-output background commands", TIMEOUT);
     const allEvents = JSON.stringify(events);
-    assert.match(allEvents, /Bash job bg_1 started in background/);
-    assert.match(allEvents, /Bash job bg_2 started in background/);
+    assert.match(allEvents, /Bash job bg001 started in background/);
+    assert.match(allEvents, /Bash job bg002 started in background/);
 
-    const first = await mock.waitForRequest((req, i) => i >= 2 && /background_bash_result\\?" id=\\?"bg_1/.test(requestText(req)) && requestText(req).includes("stdout-line") && requestText(req).includes("stderr-line"), TIMEOUT);
+    const first = await mock.waitForRequest((req, i) => i >= 2 && /background_bash_result\\?" id=\\?"bg001/.test(requestText(req)) && requestText(req).includes("stdout-line") && requestText(req).includes("stderr-line"), TIMEOUT);
     const firstText = requestText(first.request);
-    assert.match(firstText, /id=\\?"bg_1\\?"/);
+    assert.match(firstText, /id=\\?"bg001\\?"/);
     assert.match(firstText, /stdout-line/);
     assert.match(firstText, /stderr-line/);
     assert.match(firstText, /outcome=\\?"exit\\?"/);
@@ -307,9 +307,15 @@ test("auto-background records only post-background output in pbb log while final
     const textReq = backgroundResultText(request);
     assert.match(textReq, /before-threshold/);
     assert.match(textReq, /after-threshold/);
-    const logPath = join(pbbRoot, "sessions", "session-key-auto-log-test", "instances", "instance-auto-log-test", "logs", "bg_1.log");
+    const jobPath = join(pbbRoot, "sessions", "session-key-auto-log-test", "instances", "instance-auto-log-test", "jobs", "bg001.json");
+    const logPath = join(pbbRoot, "sessions", "session-key-auto-log-test", "instances", "instance-auto-log-test", "logs", "bg001.log");
     await waitForCondition(() => existsSync(logPath) && readFileSync(logPath, "utf8").includes("after-threshold"));
     assert.match(readFileSync(logPath, "utf8"), /after-threshold/);
+    const job = JSON.parse(readFileSync(jobPath, "utf8"));
+    assert.equal(job.jobId, "bg001");
+    assert.equal(job.runner, "pbb");
+    assert.equal(typeof job.pid, "number");
+    assert.equal(typeof job.pgid, "number");
   } finally {
     await mock.close();
     rmSync(cwd, { recursive: true, force: true });
@@ -327,16 +333,47 @@ test("bash background true uses sequential per-session job ids", async () => {
   try {
     const events = await mock.run("start two background commands", TIMEOUT);
     const all = JSON.stringify(events);
-    assert.match(all, /Bash job bg_1 started in background\./);
-    assert.match(all, /Bash job bg_2 started in background\./);
+    assert.match(all, /Bash job bg001 started in background\./);
+    assert.match(all, /Bash job bg002 started in background\./);
 
     const first = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("<pi_context"), TIMEOUT);
     const second = await mock.waitForRequest((req, i) => i > first.index && requestText(req).includes("<pi_context"), TIMEOUT);
     const both = [...backgroundResultTexts(first.request), ...backgroundResultTexts(second.request)].join("\n");
-    assert.match(both, /id="bg_1"/);
-    assert.match(both, /id="bg_2"/);
+    assert.match(both, /id="bg001"/);
+    assert.match(both, /id="bg002"/);
   } finally {
     await mock.close();
+  }
+});
+
+test("bash background job ids continue from padded session history after restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-id-restore-${process.pid}-${Date.now()}-`));
+  const sessionFile = join(dir, "session.jsonl");
+
+  const first = await createBgMock(script(
+    bg("echo first-id"),
+    text("first id started"),
+    text("first id done"),
+  ), { sessionFile });
+  try {
+    const events = await first.run("start first padded id job", TIMEOUT);
+    assert.match(JSON.stringify(events), /Bash job bg001 started in background/);
+    await first.waitForRequest((req, i) => i >= 2 && requestText(req).includes("first-id"), TIMEOUT);
+  } finally {
+    await first.close();
+  }
+
+  const second = await createBgMock(script(
+    bg("echo second-id"),
+    text("second id started"),
+    text("second id done"),
+  ), { sessionFile });
+  try {
+    const events = await second.run("start second padded id job", TIMEOUT);
+    assert.match(JSON.stringify(events), /Bash job bg002 started in background/);
+  } finally {
+    await second.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -346,8 +383,8 @@ test("pbb CLI defaults to current instance and requires explicit scope for other
   const base = join(pbbRoot, "sessions", "scope-key", "instances");
   mkdirSync(join(base, "current", "jobs"), { recursive: true });
   mkdirSync(join(base, "other", "jobs"), { recursive: true });
-  writeFileSync(join(base, "current", "jobs", "bg_1.json"), JSON.stringify({ jobId: "bg_1", globalJobId: "current:bg_1", status: "running", command: "current job", startedAt: new Date().toISOString(), instanceId: "current" }));
-  writeFileSync(join(base, "other", "jobs", "bg_1.json"), JSON.stringify({ jobId: "bg_1", globalJobId: "other:bg_1", status: "running", command: "other job", startedAt: new Date().toISOString(), instanceId: "other" }));
+  writeFileSync(join(base, "current", "jobs", "bg001.json"), JSON.stringify({ jobId: "bg001", globalJobId: "current:bg001", status: "running", command: "current job", startedAt: new Date().toISOString(), instanceId: "current" }));
+  writeFileSync(join(base, "other", "jobs", "bg001.json"), JSON.stringify({ jobId: "bg001", globalJobId: "other:bg001", status: "running", command: "other job", startedAt: new Date().toISOString(), instanceId: "other" }));
 
   try {
     const env = { ...process.env, PBB_ROOT: pbbRoot, PI_LANE_SESSION_KEY: "scope-key", PI_LANE_SESSION_ID: "scope-session", PI_LANE_INSTANCE_ID: "current", PI_LANE_CURRENT_LANE: "main" };
@@ -359,7 +396,7 @@ test("pbb CLI defaults to current instance and requires explicit scope for other
     assert.match(session, /current job/);
     assert.match(session, /other job/);
 
-    assert.throws(() => execFileSync(process.execPath, [PBB_CLI, "status", "bg_1", "--scope", "session"], { env, encoding: "utf8", stdio: "pipe" }), /Command failed/);
+    assert.throws(() => execFileSync(process.execPath, [PBB_CLI, "status", "bg001", "--scope", "session"], { env, encoding: "utf8", stdio: "pipe" }), /Command failed/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -375,8 +412,8 @@ test("pbb shows pi-lane owner liveness and stale status", () => {
   mkdirSync(join(pbbBase, "current", "jobs"), { recursive: true });
   mkdirSync(join(pbbBase, "stale", "jobs"), { recursive: true });
   mkdirSync(laneBase, { recursive: true });
-  writeFileSync(join(pbbBase, "current", "jobs", "bg_1.json"), JSON.stringify({ jobId: "bg_1", globalJobId: "current:bg_1", status: "running", command: "live", startedAt: new Date().toISOString(), instanceId: "current", laneRoot }));
-  writeFileSync(join(pbbBase, "stale", "jobs", "bg_1.json"), JSON.stringify({ jobId: "bg_1", globalJobId: "stale:bg_1", status: "running", command: "stale", startedAt: new Date().toISOString(), instanceId: "stale", laneRoot }));
+  writeFileSync(join(pbbBase, "current", "jobs", "bg001.json"), JSON.stringify({ jobId: "bg001", globalJobId: "current:bg001", status: "running", command: "live", startedAt: new Date().toISOString(), instanceId: "current", laneRoot }));
+  writeFileSync(join(pbbBase, "stale", "jobs", "bg001.json"), JSON.stringify({ jobId: "bg001", globalJobId: "stale:bg001", status: "running", command: "stale", startedAt: new Date().toISOString(), instanceId: "stale", laneRoot }));
   writeFileSync(join(laneBase, "current.json"), JSON.stringify({ instanceId: "current", status: "idle", lastSeenAt: new Date().toISOString() }));
   writeFileSync(join(laneBase, "stale.json"), JSON.stringify({ instanceId: "stale", status: "disconnected", lastSeenAt: "2000-01-01T00:00:00.000Z" }));
 
@@ -419,12 +456,12 @@ test("pbb lists and tails current pi-lane instance background jobs", async () =>
     const events = await mock.run("start a background command and inspect it with pbb", TIMEOUT);
     const all = JSON.stringify(events);
     assert.match(all, /source=\\?"pbb\\?"/);
-    assert.match(all, /job=bg_1/);
+    assert.match(all, /job=bg001/);
     assert.match(all, /instance-pbb-test/);
 
     await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("pbb-done"), TIMEOUT);
-    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-test", "instances", "instance-pbb-test", "jobs", "bg_1.json");
-    const logPath = join(pbbRoot, "sessions", "session-key-pbb-test", "instances", "instance-pbb-test", "logs", "bg_1.log");
+    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-test", "instances", "instance-pbb-test", "jobs", "bg001.json");
+    const logPath = join(pbbRoot, "sessions", "session-key-pbb-test", "instances", "instance-pbb-test", "logs", "bg001.log");
     await waitForCondition(() => existsSync(logPath) && readFileSync(logPath, "utf8").includes("pbb-done"));
     assert.equal(JSON.parse(readFileSync(jobPath, "utf8")).sessionId, "session-pbb-test");
     assert.match(readFileSync(logPath, "utf8"), /pbb-done/);
@@ -449,18 +486,52 @@ test("pbb kill requests abort a live current-instance background job", async () 
 
   const mock = await createBgMock(script(
     bg(`sleep 5; echo survived > ${JSON.stringify(marker)}`),
-    sh(`node ${JSON.stringify(PBB_CLI)} kill bg_1`),
+    sh(`node ${JSON.stringify(PBB_CLI)} kill bg001`),
     text("requested kill"),
     text("saw aborted result"),
   ), { env });
 
   try {
     const events = await mock.run("start and kill a background command", TIMEOUT);
-    assert.match(JSON.stringify(events), /kill requested for bg_1/);
-    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-kill-test", "instances", "instance-pbb-kill-test", "jobs", "bg_1.json");
-    const logPath = join(pbbRoot, "sessions", "session-key-pbb-kill-test", "instances", "instance-pbb-kill-test", "logs", "bg_1.log");
+    assert.match(JSON.stringify(events), /kill requested for bg001/);
+    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-kill-test", "instances", "instance-pbb-kill-test", "jobs", "bg001.json");
+    const logPath = join(pbbRoot, "sessions", "session-key-pbb-kill-test", "instances", "instance-pbb-kill-test", "logs", "bg001.log");
     await waitForCondition(() => existsSync(jobPath) && JSON.parse(readFileSync(jobPath, "utf8")).outcome === "abort");
     assert.match(readFileSync(logPath, "utf8"), /Command aborted/);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await mock.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pbb kill honors --signal for live current-instance jobs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-kill-signal-${process.pid}-${Date.now()}-`));
+  const pbbRoot = join(dir, "pbb");
+  const marker = join(dir, "should-not-exist");
+  const env = {
+    PBB_ROOT: pbbRoot,
+    PI_LANE_SESSION_ID: "session-pbb-kill-signal-test",
+    PI_LANE_SESSION_KEY: "session-key-pbb-kill-signal-test",
+    PI_LANE_SESSION_FILE: join(dir, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: "instance-pbb-kill-signal-test",
+    PI_LANE_CURRENT_LANE: "main",
+  };
+
+  const mock = await createBgMock(script(
+    bg(`bash -c 'trap "" TERM; sleep 5; echo survived > ${JSON.stringify(marker)}'`),
+    sh(`node ${JSON.stringify(PBB_CLI)} kill bg001 --signal KILL`),
+    text("requested kill signal"),
+    text("saw signal abort"),
+  ), { env });
+
+  try {
+    const events = await mock.run("start and kill a signal-resistant background command", TIMEOUT);
+    assert.match(JSON.stringify(events), /kill requested for bg001/);
+    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-kill-signal-test", "instances", "instance-pbb-kill-signal-test", "jobs", "bg001.json");
+    await waitForCondition(() => existsSync(jobPath) && JSON.parse(readFileSync(jobPath, "utf8")).outcome === "abort");
+    const job = JSON.parse(readFileSync(jobPath, "utf8"));
+    assert.equal(job.killSignal, "SIGKILL");
     assert.equal(existsSync(marker), false);
   } finally {
     await mock.close();
@@ -497,6 +568,36 @@ test("default PBB runner preserves shell semantics, cwd, env, stdout, stderr, an
     assert.match(result, /redirected/);
     assert.match(result, /Command exited with code 9/);
     assert.match(result, /exit_code=\\?"9\\?"/);
+  } finally {
+    await mock.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("auto-background timeout kills process group descendants", async () => {
+  const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 0.1 });
+  const marker = join(cwd, "should-not-exist");
+  const env = {
+    PBB_ROOT: join(cwd, "pbb"),
+    PI_LANE_SESSION_ID: "session-auto-timeout",
+    PI_LANE_SESSION_KEY: "session-key-auto-timeout",
+    PI_LANE_SESSION_FILE: join(cwd, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: "instance-auto-timeout",
+    PI_LANE_CURRENT_LANE: "main",
+  };
+  const mock = await createBgMock(script(
+    sh(`sh -c 'sleep 2; echo survived > ${JSON.stringify(marker)}'`, 1),
+    text("initial auto timeout turn"),
+    text("saw auto timeout result"),
+  ), { cwd, env });
+
+  try {
+    const events = await mock.run("auto-background and timeout a descendant command", TIMEOUT);
+    assert.match(JSON.stringify(events), /Bash job bg001 moved to background after 0\.1s\./);
+    const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("Command timed out after 1 seconds"), TIMEOUT);
+    assert.match(requestText(request), /outcome=\\?"timeout\\?"/);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.equal(existsSync(marker), false);
   } finally {
     await mock.close();
     rmSync(cwd, { recursive: true, force: true });
@@ -576,15 +677,15 @@ test("default PBB runner records pid/pgid and pbb kill terminates the process gr
 
   const mock = await createBgMock(script(
     bg(`sh -c 'sleep 5; echo survived > ${JSON.stringify(marker)}'`),
-    sh(`node ${JSON.stringify(PBB_CLI)} kill bg_1`),
+    sh(`node ${JSON.stringify(PBB_CLI)} kill bg001`),
     text("requested runner kill"),
     text("saw runner abort"),
   ), { env });
 
   try {
     const events = await mock.run("start and kill a pbb-runner background command", TIMEOUT);
-    assert.match(JSON.stringify(events), /kill requested for bg_1/);
-    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-runner-test", "instances", "instance-pbb-runner-test", "jobs", "bg_1.json");
+    assert.match(JSON.stringify(events), /kill requested for bg001/);
+    const jobPath = join(pbbRoot, "sessions", "session-key-pbb-runner-test", "instances", "instance-pbb-runner-test", "jobs", "bg001.json");
     await waitForCondition(() => existsSync(jobPath) && JSON.parse(readFileSync(jobPath, "utf8")).outcome === "abort");
     const job = JSON.parse(readFileSync(jobPath, "utf8"));
     assert.equal(job.runner, "pbb");
@@ -609,9 +710,9 @@ test("pbb kill --stale can signal a recorded stale process group", async () => {
   child.unref();
 
   try {
-    writeFileSync(join(jobDir, "bg_stale.json"), JSON.stringify({ jobId: "bg_stale", globalJobId: `${instance}:bg_stale`, status: "running", command: "stale", startedAt: new Date().toISOString(), instanceId: instance, runner: "pbb", pid: child.pid, pgid: child.pid }));
+    writeFileSync(join(jobDir, "bg999.json"), JSON.stringify({ jobId: "bg999", globalJobId: `${instance}:bg999`, status: "running", command: "stale", startedAt: new Date().toISOString(), instanceId: instance, runner: "pbb", pid: child.pid, pgid: child.pid }));
     const env = { ...process.env, PBB_ROOT: pbbRoot, PI_LANE_SESSION_KEY: key, PI_LANE_SESSION_ID: "stale-session", PI_LANE_INSTANCE_ID: "current" };
-    const out = execFileSync(process.execPath, [PBB_CLI, "kill", "bg_stale", "--instance", instance, "--stale"], { env, encoding: "utf8" });
+    const out = execFileSync(process.execPath, [PBB_CLI, "kill", "bg999", "--instance", instance, "--stale"], { env, encoding: "utf8" });
     assert.match(out, /stale process-group kill sent/);
     await waitForCondition(() => {
       try {
@@ -680,7 +781,7 @@ test("bash background true records provenance even when session parentId points 
     const customEntry = entries.find((entry) =>
       entry.type === "custom_message" &&
       entry.customType === "background_bash_result" &&
-      entry.details?.jobId === "bg_1"
+      entry.details?.jobId === "bg001"
     );
     assert.ok(customEntry, "expected background_bash_result custom message in session JSONL");
 
@@ -694,7 +795,7 @@ test("bash background true records provenance even when session parentId points 
     assert.equal(customEntry.details.startedAt, toolResultEntry.message.details.startedAt);
     assert.match(customEntry.content, new RegExp(`tool_call_id="${escapeRegExp(toolCallId)}"`));
     assert.match(customEntry.content, /started_at="\d{4}-\d{2}-\d{2}T[^"]+"/);
-    assert.match(customEntry.content, /id="bg_1"/);
+    assert.match(customEntry.content, /id="bg001"/);
 
     const sessionText = readFileSync(sessionFile, "utf8");
     const occurrences = sessionText.match(new RegExp(escapeRegExp(toolCallId), "g")) ?? [];
@@ -723,21 +824,36 @@ test("bash background true kills active jobs when the session closes", async () 
   assert.equal(existsSync(marker), false, "background job should be killed on session close");
 });
 
-test("bash background true truncates verbose PBB results with a pbb tail hint", async () => {
+test("bash background true truncates verbose PBB results and pbb tail --full returns complete output", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-truncate-${process.pid}-${Date.now()}-`));
+  const pbbRoot = join(dir, "pbb");
+  const env = {
+    PBB_ROOT: pbbRoot,
+    PI_LANE_SESSION_ID: "session-truncate-test",
+    PI_LANE_SESSION_KEY: "session-key-truncate-test",
+    PI_LANE_SESSION_FILE: join(dir, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: "instance-truncate-test",
+    PI_LANE_CURRENT_LANE: "main",
+  };
   const mock = await createBgMock(script(
     bg("python3 - <<'PY'\nfor i in range(2105): print(f'line {i}')\nPY"),
     text("initial turn complete"),
     text("saw truncated result"),
-  ));
+  ), { env });
 
   try {
     await mock.run("start a verbose background command", TIMEOUT);
     const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("<pi_context"), TIMEOUT);
     const textReq = backgroundResultText(request);
-    assert.match(textReq, /Showing last 2000 of \d+ lines\. Full output: pbb tail bg_1 --full/);
+    assert.match(textReq, /Showing last 2000 of \d+ lines\. Full output: pbb tail bg001 --full/);
     assert.match(textReq, /line 2104/);
     assert.doesNotMatch(textReq, /line 0\nline 1\nline 2/);
+
+    const tail = execFileSync(process.execPath, [PBB_CLI, "tail", "bg001", "--full"], { env: { ...process.env, ...env }, encoding: "utf8" });
+    assert.match(tail, /line 0/);
+    assert.match(tail, /line 2104/);
   } finally {
     await mock.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

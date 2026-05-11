@@ -62,7 +62,7 @@ bash({ command: "npm test", background: true, timeout: 120 })
 Completion results arrive as Pi context messages:
 
 ```xml
-<pi_context source="pi-background-bash" kind="background_bash_result" id="bg_1" outcome="exit" exit_code="0">
+<pi_context source="pi-background-bash" kind="background_bash_result" id="bg001" outcome="exit" exit_code="0">
 ...
 </pi_context>
 ```
@@ -80,12 +80,12 @@ This package also installs `pbb`, a small inspector for background bash jobs.
 ```bash
 pbb self
 pbb list
-pbb status bg_1
-pbb tail bg_1 -n 80
-pbb kill bg_1
+pbb status bg001
+pbb tail bg001 -n 80
+pbb kill bg001
 ```
 
-`pbb` is designed for agents: output is wrapped in compact `pi_context` envelopes and always includes session/instance identity. When [`pi-lane`](https://github.com/sshkeda/pi-lane) is installed, `pbb` uses its runtime identity env vars (`PI_LANE_SESSION_KEY`, `PI_LANE_INSTANCE_ID`, etc.) and defaults to the current live Pi instance, not every terminal attached to the same session.
+`pbb` is designed for agents: output is wrapped in compact `pi_context` envelopes and always includes session/instance identity. Local job IDs are fixed-width strings such as `bg001`, `bg002`, and `bg010` so listings sort chronologically. When [`pi-lane`](https://github.com/sshkeda/pi-lane) is installed, `pbb` uses its runtime identity env vars (`PI_LANE_SESSION_KEY`, `PI_LANE_INSTANCE_ID`, etc.) and defaults to the current live Pi instance, not every terminal attached to the same session.
 
 Background job state is stored under:
 

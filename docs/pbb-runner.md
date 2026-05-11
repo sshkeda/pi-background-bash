@@ -6,6 +6,7 @@ PBB is the baseline bash runner for pi-background-bash v1.
 
 - Every command runs through `bash -lc`.
 - Background jobs are owned by PBB from process start.
+- Job IDs use fixed-width local IDs: `bg001`, `bg002`, ..., `bg999`, then `bg1000`.
 - Jobs record `pid` and `pgid` for process-group control.
 - `pbb list`, `pbb status`, and `pbb tail` inspect the recorded job state/logs.
 - `pbb kill` requests live owner shutdown through the instance mailbox.
