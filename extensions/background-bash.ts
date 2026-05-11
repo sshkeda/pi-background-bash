@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { AgentToolUpdateCallback, BashToolDetails, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
@@ -650,6 +650,30 @@ function truncateBodyWithHint(body: string, fullOutputHint: string): string {
 	return `[Showing ${lineSummary}${byteSummary}. Full output: ${fullOutputHint}]\n\n${kept}`;
 }
 
+function trimOversizedToolResultsForContext(messages: AgentMessage[]): AgentMessage[] | undefined {
+	let changed = false;
+	const next = messages.map((message) => {
+		const record = asRecord(message);
+		if (record?.role !== "toolResult") return message;
+		const content = Array.isArray(record.content) ? record.content : [];
+		let contentChanged = false;
+		const nextContent = content.map((part) => {
+			const item = asRecord(part);
+			if (item?.type !== "text" || typeof item.text !== "string" || !shouldTruncateBody(item.text)) return part;
+			contentChanged = true;
+			const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
+			return {
+				...part,
+				text: truncateBodyWithHint(item.text, `${toolName} result trimmed by pi-background-bash context guard`),
+			};
+		});
+		if (!contentChanged) return message;
+		changed = true;
+		return { ...message, content: nextContent } as AgentMessage;
+	});
+	return changed ? next : undefined;
+}
+
 function writeForegroundFullOutput(body: string): string {
 	const dir = join(homedir(), ".pi", "pbb", "truncated");
 	mkdirSync(dir, { recursive: true });
@@ -883,6 +907,11 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		abortAllJobs();
 		pendingJobs.detach();
+	});
+
+	pi.on("context", (event) => {
+		const messages = trimOversizedToolResultsForContext(event.messages);
+		if (messages) return { messages };
 	});
 
 	pi.registerTool({

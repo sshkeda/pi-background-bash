@@ -122,6 +122,82 @@ test("bash override truncates verbose foreground results before they enter model
   }
 });
 
+test("context guard trims oversized historical tool results before replay", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-context-guard-${process.pid}-${Date.now()}-`));
+  const sessionFile = join(dir, "session.jsonl");
+  const now = new Date().toISOString();
+  const toolCallId = "call_contextGuard123|fc_contextGuard456";
+  const hugeResult = [
+    "HUGE_CONTEXT_START should be trimmed away",
+    ...Array.from({ length: 6000 }, (_, i) => `HUGE_CONTEXT_LINE_${String(i).padStart(5, "0")} ${"x".repeat(80)}`),
+    "HUGE_CONTEXT_END should remain",
+  ].join("\n");
+  const entries = [
+    { type: "session", version: 3, id: "context-guard-session", timestamp: now, cwd: dir },
+    {
+      type: "message",
+      id: "user-root",
+      parentId: null,
+      timestamp: now,
+      message: { role: "user", content: [{ type: "text", text: "run huge historical command" }], timestamp: Date.now() },
+    },
+    {
+      type: "message",
+      id: "assistant-call",
+      parentId: "user-root",
+      timestamp: now,
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "python huge.py" } }],
+        stopReason: "toolUse",
+        provider: "faux",
+        api: "faux",
+        model: "faux",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        timestamp: Date.now(),
+      },
+    },
+    {
+      type: "message",
+      id: "huge-result",
+      parentId: "assistant-call",
+      timestamp: now,
+      message: {
+        role: "toolResult",
+        toolCallId,
+        toolName: "bash",
+        content: [{ type: "text", text: hugeResult }],
+        details: {},
+        timestamp: Date.now(),
+      },
+    },
+    {
+      type: "message",
+      id: "followup-user",
+      parentId: "huge-result",
+      timestamp: now,
+      message: { role: "user", content: [{ type: "text", text: "continue after huge output" }], timestamp: Date.now() },
+    },
+  ];
+  writeFileSync(sessionFile, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+
+  const mock = await createBgMock(script(
+    text("context guard kept request small"),
+  ), { sessionFile, cwd: dir });
+
+  try {
+    await mock.run("continue after huge historical output", TIMEOUT);
+    const request = requestText(mock.requests.at(-1));
+    assert.match(request, /bash result trimmed by pi-background-bash context guard/);
+    assert.match(request, /HUGE_CONTEXT_END should remain/);
+    assert.doesNotMatch(request, /HUGE_CONTEXT_START should be trimmed away/);
+    assert.ok(request.length < 180_000, `historical tool result was not capped enough (${request.length} chars)`);
+  } finally {
+    await mock.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("bash override preserves shell semantics, cwd, environment, redirects, pipes, and subshells", async () => {
   const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
   const mock = await createBgMock(script(
