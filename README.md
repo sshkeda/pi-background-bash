@@ -85,7 +85,7 @@ pbb tail bg001 -n 80
 pbb kill bg001
 ```
 
-`pbb` is designed for agents: output is wrapped in compact `pi_context` envelopes and always includes session/instance identity. Local job IDs are fixed-width strings such as `bg001`, `bg002`, and `bg010` so listings sort chronologically. When [`pi-lane`](https://github.com/sshkeda/pi-lane) is installed, `pbb` uses its runtime identity env vars (`PI_LANE_SESSION_KEY`, `PI_LANE_INSTANCE_ID`, etc.) and defaults to the current live Pi instance, not every terminal attached to the same session.
+`pbb` is designed for agents: output is wrapped in compact `pi_context` envelopes and always includes session/instance identity. Local job IDs are fixed-width strings such as `bg001`, `bg002`, and `bg010` so listings sort chronologically. `pbb` uses [`pi-lane`](https://github.com/sshkeda/pi-lane) runtime identity env vars (`PI_LANE_SESSION_KEY`, `PI_LANE_INSTANCE_ID`, etc.) and defaults to the current live Pi instance, not every terminal attached to the same session.
 
 Background job state is stored under:
 
@@ -97,7 +97,7 @@ Background job state is stored under:
   logs/{jobId}.log
 ```
 
-`pbb list` and `pbb status` show owner liveness through the `pil` CLI from `pi-lane` when available, so stale/disconnected owners are visible instead of silently confused with the current runtime.
+`pbb list` and `pbb status` show owner liveness through the tracked `pil` CLI from `pi-lane`, so stale/disconnected owners are visible instead of silently confused with the current runtime. If tracked `pi-lane`/`pil` is missing or fails, `pbb` hard-fails instead of silently degrading liveness to unknown.
 
 `pbb kill` writes a kill request into the owning instance mailbox. A live `pi-background-bash` runtime polls that mailbox and aborts the matching in-process job. Jobs record `pid`/`pgid`, so the runtime kills the full process group. If the owner is stale, `pbb kill --stale --instance <id> <job>` can signal the recorded process group explicitly.
 

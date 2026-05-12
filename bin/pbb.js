@@ -4,9 +4,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SCHEMA_VERSION = 1;
 const DEFAULT_TAIL_LINES = 80;
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TRACKED_PIL_BIN = join(HERE, "..", "node_modules", "pi-lane", "bin", "pil.js");
 
 function attr(value) {
   return String(value ?? "")
@@ -66,7 +69,7 @@ function identity() {
 
 function requireIdentity(id) {
   if (!id.sessionKey || !id.instanceId) {
-    console.error(context("pbb.error", { scope: "none" }, `<summary>pbb cannot determine current Pi lane identity</summary>\nRun inside Pi with pi-lane installed, or set PI_LANE_SESSION_KEY and PI_LANE_INSTANCE_ID.`));
+    console.error(context("pbb.error", { scope: "none", error: "missing_identity" }, "pbb cannot determine current Pi lane identity.\nRun inside Pi with pi-lane installed, or set PI_LANE_SESSION_KEY and PI_LANE_INSTANCE_ID."));
     process.exit(3);
   }
 }
@@ -108,13 +111,31 @@ function readJson(path) {
 
 let pilInstancesCache;
 
+function failPil(id, message, error) {
+  const detail = error instanceof Error ? error.message : String(error || "");
+  console.error(context("pbb.error", {
+    session_key: id.sessionKey,
+    instance_id: id.instanceId,
+    error: "pi_lane_unavailable",
+  }, `${message}${detail ? `\n${detail}` : ""}`));
+  process.exit(4);
+}
+
+function pilCommand(id) {
+  if (process.env.PBB_PIL_BIN) return { file: process.env.PBB_PIL_BIN, args: [] };
+  if (!existsSync(TRACKED_PIL_BIN)) {
+    failPil(id, `tracked pi-lane pil binary is missing: ${TRACKED_PIL_BIN}`);
+  }
+  return { file: process.execPath, args: [TRACKED_PIL_BIN] };
+}
+
 function readPilInstances(id) {
   if (pilInstancesCache !== undefined) return pilInstancesCache;
-  const pilBin = process.env.PBB_PIL_BIN || "pil";
+  const pil = pilCommand(id);
   try {
-    const raw = execFileSync(pilBin, ["instances", "--json"], {
+    const raw = execFileSync(pil.file, [...pil.args, "instances", "--json"], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         PI_LANE_ROOT: id.laneRoot || process.env.PI_LANE_ROOT || "",
@@ -126,15 +147,14 @@ function readPilInstances(id) {
       },
     });
     pilInstancesCache = JSON.parse(raw).instances || [];
-  } catch {
-    pilInstancesCache = null;
+  } catch (error) {
+    failPil(id, "tracked pi-lane pil command failed", error);
   }
   return pilInstancesCache;
 }
 
 function ownerInfo(id, job) {
-  const instances = readPilInstances(id);
-  const state = Array.isArray(instances) ? instances.find((item) => item.instanceId === job.instanceId) : undefined;
+  const state = readPilInstances(id).find((item) => item.instanceId === job.instanceId);
   return {
     ownerStatus: state?.status || "unknown",
     ownerLastSeenAt: state?.lastSeenAt || "",
@@ -217,7 +237,7 @@ function printSelf(id, opts) {
     instance_id: id.instanceId,
     lane: id.lane,
     scope: "current-instance",
-  }, `<summary>current Pi background bash identity</summary>\n${json(payload)}`));
+  }, json(payload)));
 }
 
 function formatJob(job) {
@@ -231,11 +251,9 @@ function formatJob(job) {
 function printInstances(id, opts) {
   const scope = opts.scope || "session";
   const pilInstances = readPilInstances(id);
-  const instances = Array.isArray(pilInstances)
-    ? pilInstances.map((item) => ({ instanceId: item.instanceId, ownerLive: Boolean(item.live), ownerStatus: item.status || "unknown", ownerLastSeenAt: item.lastSeenAt || "", lane: item.lane || "" }))
-    : listInstanceIds(id, scope, opts.instance).map((instanceId) => ({ instanceId, ownerLive: false, ownerStatus: "unknown", ownerLastSeenAt: "", lane: "" }));
-  if (opts.json) return console.log(json({ kind: "pbb.instances", schemaVersion: SCHEMA_VERSION, sessionId: id.sessionId, sessionKey: id.sessionKey, instanceId: id.instanceId, lane: id.lane, scope, source: Array.isArray(pilInstances) ? "pil" : "pbb", instances }));
-  console.log(context("pbb.instances", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, source: Array.isArray(pilInstances) ? "pil" : "pbb", instances: instances.length }, `<summary>${instances.length} instances</summary>\n${instances.map((item) => `- instance=${item.instanceId} live=${item.ownerLive} status=${item.ownerStatus} lane=${item.lane || ""} last_seen=${item.ownerLastSeenAt || "unknown"}`).join("\n") || "No instances in scope."}`));
+  const instances = pilInstances.map((item) => ({ instanceId: item.instanceId, ownerLive: Boolean(item.live), ownerStatus: item.status || "unknown", ownerLastSeenAt: item.lastSeenAt || "", lane: item.lane || "" }));
+  if (opts.json) return console.log(json({ kind: "pbb.instances", schemaVersion: SCHEMA_VERSION, sessionId: id.sessionId, sessionKey: id.sessionKey, instanceId: id.instanceId, lane: id.lane, scope, source: "pil", instances }));
+  console.log(context("pbb.instances", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, source: "pil", instances: instances.length }, instances.map((item) => `- instance=${item.instanceId} live=${item.ownerLive} status=${item.ownerStatus} lane=${item.lane || ""} last_seen=${item.ownerLastSeenAt || "unknown"}`).join("\n") || "No instances in scope."));
 }
 
 function printList(id, opts) {
@@ -251,7 +269,8 @@ function printList(id, opts) {
     lane: id.lane,
     scope,
     jobs: jobs.length,
-  }, `<summary>${jobs.length} jobs; ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(" ") || "none"}</summary>\n${jobs.map(formatJob).join("\n") || "No background bash jobs in scope."}`));
+    ...Object.fromEntries(Object.entries(counts).map(([status, count]) => [`jobs_${status}`, count])),
+  }, jobs.map(formatJob).join("\n") || "No background bash jobs in scope."));
 }
 
 function printStatus(id, jobId, opts) {
@@ -259,16 +278,16 @@ function printStatus(id, jobId, opts) {
   const scope = opts.scope || (opts.instance ? "session" : "current-instance");
   const result = findJob(id, jobId, { scope, instance: opts.instance });
   if (result.error === "missing") {
-    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId }, `<summary>unknown job ${jobId}</summary>`));
+    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId, error: "unknown_job" }, `unknown job ${jobId}`));
     process.exit(2);
   }
   if (result.error === "ambiguous") {
-    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId }, `<summary>ambiguous job ${jobId}</summary>\n${result.jobs.map((job) => `${job.instanceId}:${job.jobId}`).join("\n")}`));
+    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId, error: "ambiguous_job", matches: result.jobs.length }, `ambiguous job ${jobId}\n${result.jobs.map((job) => `${job.instanceId}:${job.jobId}`).join("\n")}`));
     process.exit(3);
   }
   const job = result.job;
   if (opts.json) return console.log(json({ kind: "pbb.status", schemaVersion: SCHEMA_VERSION, sessionId: id.sessionId, sessionKey: id.sessionKey, instanceId: id.instanceId, lane: id.lane, scope, job }));
-  console.log(context("pbb.status", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status, cursor: job.lastEventId }, `<summary>${job.jobId} ${job.status}${job.exitCode == null ? "" : ` exit=${job.exitCode}`}</summary>\n${json(job)}`));
+  console.log(context("pbb.status", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status, exit_code: job.exitCode, cursor: job.lastEventId }, json(job)));
 }
 
 function tailText(path, lines, full) {
@@ -284,14 +303,14 @@ function printTail(id, jobId, opts) {
   const scope = opts.scope || (opts.instance ? "session" : "current-instance");
   const result = findJob(id, jobId, { scope, instance: opts.instance });
   if (!result.job) {
-    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId }, `<summary>${result.error === "ambiguous" ? "ambiguous" : "unknown"} job ${jobId}</summary>`));
+    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId, error: result.error === "ambiguous" ? "ambiguous_job" : "unknown_job" }, `${result.error === "ambiguous" ? "ambiguous" : "unknown"} job ${jobId}`));
     process.exit(result.error === "ambiguous" ? 3 : 2);
   }
   const job = result.job;
   const logPath = job.logPath || join(logsDir(id, job.instanceId), `${job.jobId}.log`);
   const body = tailText(logPath, opts.lines, opts.full);
   if (opts.json) return console.log(json({ kind: "pbb.tail", schemaVersion: SCHEMA_VERSION, sessionId: id.sessionId, sessionKey: id.sessionKey, instanceId: id.instanceId, lane: id.lane, scope, job, log: body }));
-  console.log(context("pbb.tail", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status, cursor: job.lastEventId, lines: opts.full ? "full" : (opts.lines || DEFAULT_TAIL_LINES) }, `<summary>${job.jobId} ${job.status}; showing ${opts.full ? "full log" : `last ${opts.lines || DEFAULT_TAIL_LINES} lines`}</summary>\n${body || "No log output recorded yet."}`));
+  console.log(context("pbb.tail", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status, cursor: job.lastEventId, lines: opts.full ? "full" : (opts.lines || DEFAULT_TAIL_LINES) }, body || "No log output recorded yet."));
 }
 
 function normalizeSignal(signal) {
@@ -318,12 +337,12 @@ function printKill(id, jobId, opts) {
   const scope = opts.scope || (opts.instance ? "session" : "current-instance");
   const result = findJob(id, jobId, { scope, instance: opts.instance });
   if (!result.job) {
-    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId }, `<summary>${result.error === "ambiguous" ? "ambiguous" : "unknown"} job ${jobId}</summary>`));
+    console.error(context("pbb.error", { session_key: id.sessionKey, instance_id: id.instanceId, scope, job_id: jobId, error: result.error === "ambiguous" ? "ambiguous_job" : "unknown_job" }, `${result.error === "ambiguous" ? "ambiguous" : "unknown"} job ${jobId}`));
     process.exit(result.error === "ambiguous" ? 3 : 2);
   }
   const job = result.job;
   if (!["running", "kill_requested"].includes(job.status)) {
-    console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status }, `<summary>${job.jobId} is not running; no kill requested</summary>`));
+    console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, status: job.status, requested: false }, `${job.jobId} is not running; no kill requested`));
     return;
   }
   const signal = opts.signal || "TERM";
@@ -332,7 +351,7 @@ function printKill(id, jobId, opts) {
     const { _path, ...jobWithoutInternal } = job;
     const patch = { ...jobWithoutInternal, status: sent.ok ? "kill_requested" : job.status, staleKillRequestedAt: new Date().toISOString(), staleKillSignal: signal, staleKillError: sent.error };
     if (job._path) writeJsonFile(job._path, patch);
-    console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, signal, stale: true, pgid: job.pgid, ok: sent.ok }, `<summary>${sent.ok ? "stale process-group kill sent" : "stale process-group kill failed"} for ${job.jobId}</summary>\n${sent.error || ""}`));
+    console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, signal, stale: true, pgid: job.pgid, ok: sent.ok }, `${sent.ok ? "stale process-group kill sent" : "stale process-group kill failed"} for ${job.jobId}\n${sent.error || ""}`));
     process.exit(sent.ok ? 0 : 4);
   }
   const requestId = `kill_${Date.now()}_${randomUUID().slice(0, 8)}`;
@@ -351,7 +370,7 @@ function printKill(id, jobId, opts) {
   };
   writeJsonFile(join(requestsDir(id, job.instanceId), `${requestId}.json`), request);
   const warning = job.ownerStale ? `\nOwner instance appears stale. Cooperative kill is queued but may not be honored. If this is a PBB-runner job with pgid, use: pbb kill ${job.jobId} --instance ${job.instanceId} --stale` : "";
-  console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, request_id: requestId, status: job.status, owner_live: job.ownerLive }, `<summary>kill requested for ${job.jobId}</summary>\nThe owning pi-background-bash runtime will abort the job if it is still live.${warning}`));
+  console.log(context("pbb.kill", { session_id: id.sessionId, session_key: id.sessionKey, instance_id: id.instanceId, lane: id.lane, scope, job_id: job.jobId, owner_instance_id: job.instanceId, request_id: requestId, status: job.status, owner_live: job.ownerLive, requested: true }, `kill requested for ${job.jobId}\nThe owning pi-background-bash runtime will abort the job if it is still live.${warning}`));
 }
 
 const opts = parseArgs(process.argv.slice(2));

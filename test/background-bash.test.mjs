@@ -488,12 +488,31 @@ test("pbb CLI defaults to current instance and requires explicit scope for other
     const current = execFileSync(process.execPath, [PBB_CLI, "list"], { env, encoding: "utf8" });
     assert.match(current, /current job/);
     assert.doesNotMatch(current, /other job/);
+    assert.doesNotMatch(current, /<summary>/);
 
     const session = execFileSync(process.execPath, [PBB_CLI, "list", "--scope", "session"], { env, encoding: "utf8" });
     assert.match(session, /current job/);
     assert.match(session, /other job/);
 
     assert.throws(() => execFileSync(process.execPath, [PBB_CLI, "status", "bg001", "--scope", "session"], { env, encoding: "utf8", stdio: "pipe" }), /Command failed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pbb hard-fails when tracked pi-lane liveness command is unavailable", () => {
+  const dir = mkdtempSync(join(tmpdir(), `pi-background-bash-pbb-pil-missing-${process.pid}-${Date.now()}-`));
+  const pbbRoot = join(dir, "pbb");
+  const base = join(pbbRoot, "sessions", "missing-pil-key", "instances", "current", "jobs");
+  mkdirSync(base, { recursive: true });
+  writeFileSync(join(base, "bg001.json"), JSON.stringify({ jobId: "bg001", globalJobId: "current:bg001", status: "running", command: "job", startedAt: new Date().toISOString(), instanceId: "current" }));
+
+  try {
+    const env = { ...process.env, PBB_PIL_BIN: join(dir, "missing-pil"), PBB_ROOT: pbbRoot, PI_LANE_SESSION_KEY: "missing-pil-key", PI_LANE_SESSION_ID: "missing-pil-session", PI_LANE_INSTANCE_ID: "current", PI_LANE_CURRENT_LANE: "main" };
+    assert.throws(
+      () => execFileSync(process.execPath, [PBB_CLI, "list"], { env, encoding: "utf8", stdio: "pipe" }),
+      /pi_lane_unavailable/,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -52,10 +52,10 @@
     "@earendil-works/pi-agent-core": "0.74.0",
     "@earendil-works/pi-coding-agent": "0.74.0",
     "@types/node": "^22.0.0",
+    "lefthook": "^1.10.10",
     "pi-mock": "github:sshkeda/pi-mock",
-    "typescript": "^5.0.0",
     "typebox": "^1.0.55",
-    "lefthook": "^1.10.10"
+    "typescript": "^5.0.0"
   },
   "files": [
     "index.ts",
@@ -68,6 +68,7 @@
   ],
   "dependencies": {
     "pi-context": "github:sshkeda/pi-context#v0.1.6",
+    "pi-lane": "github:sshkeda/pi-lane#929a74b",
     "pi-pending": "github:sshkeda/pi-pending#v0.1.5"
   }
 }
