@@ -66,7 +66,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "pi-context": "github:sshkeda/pi-context#v0.1.5",
+    "pi-context": "github:sshkeda/pi-context#v0.1.6",
     "pi-pending": "github:sshkeda/pi-pending#v0.1.5"
   }
 }
