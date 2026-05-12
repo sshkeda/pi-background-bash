@@ -45,7 +45,8 @@ pbb kill --instance <instance_id> --stale <job_id>
 
 ## Agent guidelines
 
-- After starting a long background bash, use `pbb list` or `pbb status <job>` to inspect it.
+- After starting a long background bash, normally wait for the completion follow-up and continue independent work.
+- Use `pbb list` or `pbb status <job>` only when you need progress before completion, need to manage/kill a job, or suspect the follow-up was missed.
 - Use `pbb tail <job>` for bounded output instead of rerunning the command.
 - Treat `pbb` output as authoritative for session/instance/job identity.
 - If a job is ambiguous or belongs to another instance, ask before operating on it.

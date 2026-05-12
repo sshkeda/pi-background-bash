@@ -8,7 +8,7 @@ import type { AgentToolUpdateCallback, BashToolDetails, ExtensionAPI, Theme } fr
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { createPiPending } from "pi-pending";
-import { piContext } from "pi-context";
+import { formatTruncationNotice, piContext, truncateContextText } from "pi-context";
 import { Type } from "typebox";
 
 const MAX_ACTIVE_JOBS = 10;
@@ -633,21 +633,21 @@ async function runPbbBash(
 }
 
 function shouldTruncateBody(body: string): boolean {
-	return Buffer.byteLength(body, "utf8") > MAX_RESULT_BYTES || body.split("\n").length > MAX_RESULT_LINES;
+	return Boolean(truncateContextText(body, { mode: "tail", maxLines: MAX_RESULT_LINES, maxBytes: MAX_RESULT_BYTES, appendNotice: false }).truncation?.truncated);
+}
+
+function escapePiContextClosingTags(text: string): string {
+	return text.replace(/<\/pi_context>/gi, "<\\/pi_context>");
+}
+
+function addFullOutputHintToNotice(notice: string, fullOutputHint: string): string {
+	return notice.endsWith("]") ? `${notice.slice(0, -1)}. Full output: ${fullOutputHint}]` : `${notice} Full output: ${fullOutputHint}`;
 }
 
 function truncateBodyWithHint(body: string, fullOutputHint: string): string {
-	const bytes = Buffer.byteLength(body, "utf8");
-	const lines = body.split("\n");
-	if (bytes <= MAX_RESULT_BYTES && lines.length <= MAX_RESULT_LINES) return body;
-
-	let kept = lines.slice(-MAX_RESULT_LINES).join("\n");
-	while (Buffer.byteLength(kept, "utf8") > MAX_RESULT_BYTES && kept.length > 0) {
-		kept = kept.slice(Math.ceil(kept.length / 10));
-	}
-	const lineSummary = lines.length > MAX_RESULT_LINES ? `last ${Math.min(MAX_RESULT_LINES, lines.length)} of ${lines.length} lines` : `${lines.length} lines`;
-	const byteSummary = bytes > MAX_RESULT_BYTES ? `, capped at ${MAX_RESULT_BYTES} bytes` : "";
-	return `[Showing ${lineSummary}${byteSummary}. Full output: ${fullOutputHint}]\n\n${kept}`;
+	const { content, truncation } = truncateContextText(body, { mode: "tail", maxLines: MAX_RESULT_LINES, maxBytes: MAX_RESULT_BYTES, appendNotice: false });
+	if (!truncation?.truncated) return body;
+	return `${escapePiContextClosingTags(content)}\n\n${addFullOutputHintToNotice(formatTruncationNotice(truncation, "tail"), fullOutputHint)}`;
 }
 
 function trimOversizedToolResultsForContext(messages: AgentMessage[]): AgentMessage[] | undefined {
@@ -704,8 +704,8 @@ function truncateForegroundResult(job: ActiveJob, completed: Extract<CompletedBa
 }
 
 function buildXmlResult(job: ActiveJob, outcome: Outcome, exitCode: number | null, durationMs: number, body: string): string {
-	// pi-context only escapes closing wrapper tags so command output cannot
-	// prematurely close the XML-ish context envelope.
+	// pi-context emits payload text as-is; escape the outer wrapper close tag so
+	// command output cannot prematurely close the XML-ish context envelope.
 	return piContext({
 		source: "pi-background-bash",
 		kind: "background_bash_result",
@@ -724,7 +724,7 @@ function buildXmlResult(job: ActiveJob, outcome: Outcome, exitCode: number | nul
 			exit_code: exitCode,
 			duration_ms: durationMs,
 		},
-		body,
+		body: escapePiContextClosingTags(body),
 	});
 }
 
@@ -923,7 +923,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			"Use bash with background: true for long-running non-interactive commands such as builds, full test suites, dev servers, watchers, deploys, downloads, or commands you do not need before the next step.",
 			`Use bash normally for shell commands; Pi automatically moves bash commands that run longer than the configured auto-background threshold (${formatThreshold(DEFAULT_AUTO_BACKGROUND_AFTER_SECONDS)} by default) to the background.`,
 			"When bash reports that a command started or moved to background, do not retry it just to wait; continue independent work or tell the user the job is running.",
-			"Use the pbb CLI (`pbb list`, `pbb status <job>`, `pbb tail <job>`) to inspect current-session background bash jobs; pbb defaults to the current pi-lane runtime instance when available.",
+			"Use the pbb CLI (`pbb list`, `pbb status <job>`, `pbb tail <job>`) only when you need progress before the completion follow-up arrives, need full truncated logs, or need to manage a job; pbb defaults to the current pi-lane runtime instance when available.",
 			"When a <pi_context source=\"pi-background-bash\" kind=\"background_bash_result\"> message appears, treat it like the final result of the original bash command.",
 			"Do not use bash for interactive commands that require stdin unless the user explicitly asks for that behavior.",
 		],
@@ -967,7 +967,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 				scheduleDetachedBackgroundToolResultRepair(ctx, toolCallId);
 
 				return {
-					content: [{ type: "text", text: `Bash job ${job.id} started in background. Use pbb status ${job.id} or pbb tail ${job.id} to inspect it.` }],
+					content: [{ type: "text", text: `Bash job ${job.id} started in background. A follow-up result will arrive when it finishes; continue independent work. Use pbb only if you need progress before completion.` }],
 					details: runningJobDetails(job, ctx.cwd),
 				};
 			}
@@ -1054,7 +1054,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI) {
 			scheduleDetachedBackgroundToolResultRepair(ctx, toolCallId);
 
 			return {
-				content: [{ type: "text", text: `Bash job ${job.id} moved to background after ${formatThreshold(autoAfterSeconds)}. Use pbb status ${job.id} or pbb tail ${job.id} to inspect it.` }],
+				content: [{ type: "text", text: `Bash job ${job.id} moved to background after ${formatThreshold(autoAfterSeconds)}. A follow-up result will arrive when it finishes; continue independent work. Use pbb only if you need progress before completion.` }],
 				details: runningJobDetails(job, ctx.cwd),
 			};
 		},

@@ -1012,7 +1012,7 @@ test("bash background true truncates verbose PBB results and pbb tail --full ret
     await mock.run("start a verbose background command", TIMEOUT);
     const { request } = await mock.waitForRequest((req, i) => i >= 2 && requestText(req).includes("<pi_context"), TIMEOUT);
     const textReq = backgroundResultText(request);
-    assert.match(textReq, /Showing last 2000 of \d+ lines\. Full output: pbb tail bg001 --full/);
+    assert.match(textReq, /Showing lines \d+-\d+ of \d+\. Full output: pbb tail bg001 --full/);
     assert.match(textReq, /line 2104/);
     assert.doesNotMatch(textReq, /line 0\nline 1\nline 2/);
 
