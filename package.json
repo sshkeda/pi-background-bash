@@ -39,6 +39,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && node --test --test-force-exit test/*.mjs",
+    "test:node": "node --test --test-force-exit",
     "hooks:install": "lefthook install"
   },
   "peerDependencies": {

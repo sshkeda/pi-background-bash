@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createMock, script, text, toolCall } from "pi-mock";
+import { createMock, createControllableBrain, script, text, toolCall } from "pi-mock";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
@@ -893,6 +893,40 @@ test("session start repairs detached background bash tool results before replay"
   } finally {
     await mock.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bash background completion waits for an in-flight provider turn before triggering follow-up", async () => {
+  const cb = createControllableBrain();
+  const mock = await createBgMock(cb.brain);
+
+  try {
+    await mock.prompt("start a short background command");
+    const startCall = await cb.waitForCall(TIMEOUT);
+    startCall.respond(bg("sleep 0.2; echo race-done"));
+
+    const startContinuation = await cb.waitForCall(TIMEOUT);
+    startContinuation.respond(text("background command started"));
+    await mock.waitFor((event) => event.type === "agent_end" && JSON.stringify(event).includes("background command started"), TIMEOUT);
+
+    await mock.prompt("do unrelated work while the background command finishes");
+    const unrelatedCall = await cb.waitForCall(TIMEOUT);
+
+    // The background job finishes while the unrelated provider request above is
+    // still pending. Regression guard: do not trigger a nested follow-up request
+    // from that busy/transient context; wait until the provider turn is idle.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    assert.equal(cb.pending().length, 0, "background follow-up should not call the provider while another call is in flight");
+
+    unrelatedCall.respond(text("unrelated turn complete"));
+    await mock.waitFor((event) => event.type === "agent_end" && JSON.stringify(event).includes("unrelated turn complete"), TIMEOUT);
+
+    const followUpCall = await cb.waitForCall((req) => requestText(req).includes("race-done"), TIMEOUT);
+    assert.match(backgroundResultText(followUpCall.request), /race-done/);
+    followUpCall.respond(text("saw deferred background result"));
+    await mock.waitFor((event) => event.type === "agent_end" && JSON.stringify(event).includes("saw deferred background result"), TIMEOUT);
+  } finally {
+    await mock.close();
   }
 });
 
