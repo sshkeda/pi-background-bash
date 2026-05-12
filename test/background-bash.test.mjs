@@ -419,6 +419,44 @@ test("auto-background records only post-background output in pbb log while final
   }
 });
 
+test("background log is reset when a job id is reused in a later runtime", async () => {
+  const cwd = makeConfiguredCwd({ autoBackgroundAfterSeconds: 5 });
+  const pbbRoot = join(cwd, "pbb");
+  const sessionKey = "session-key-reused-log-test";
+  const instanceId = "instance-reused-log-test";
+  const logDir = join(pbbRoot, "sessions", sessionKey, "instances", instanceId, "logs");
+  mkdirSync(logDir, { recursive: true });
+  writeFileSync(join(logDir, "bg001.log"), "stale-previous-job-output\n");
+
+  const env = {
+    PBB_ROOT: pbbRoot,
+    PI_LANE_SESSION_ID: "session-reused-log-test",
+    PI_LANE_SESSION_KEY: sessionKey,
+    PI_LANE_SESSION_FILE: join(cwd, "session.jsonl"),
+    PI_LANE_INSTANCE_ID: instanceId,
+    PI_LANE_CURRENT_LANE: "main",
+  };
+  const mock = await createBgMock(script(
+    bg("sleep 0.1; echo fresh-reused-log-output"),
+    text("initial turn complete"),
+    text("saw fresh reused log result"),
+  ), { cwd, env });
+
+  try {
+    await mock.run("start a background command after a stale log exists", TIMEOUT);
+    const logPath = join(logDir, "bg001.log");
+    await waitForCondition(() => readFileSync(logPath, "utf8").includes("fresh-reused-log-output"));
+    const log = readFileSync(logPath, "utf8");
+    assert.match(log, /fresh-reused-log-output/);
+    assert.doesNotMatch(log, /stale-previous-job-output/);
+    assert.doesNotMatch(log, /\[pbb: output snapshot replaced\]/);
+  } finally {
+    await mock.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+
 test("bash background true uses sequential per-session job ids", async () => {
   const mock = await createBgMock(script(
     [bg("sleep 0.2; echo first"), bg("sleep 0.1; echo second")],

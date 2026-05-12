@@ -467,12 +467,19 @@ function writePbbJob(job: ActiveJob, patch: Record<string, unknown> = {}): void 
 function recordPbbJobStarted(job: ActiveJob, cwd: string): void {
 	if (!job.pbb) return;
 	job.cwd = cwd;
+	mkdirSync(pbbLogsDir(job.pbb), { recursive: true });
+	writeFileSync(join(pbbLogsDir(job.pbb), `${job.id}.log`), "");
+	job.lastLoggedBody = undefined;
 	appendPbbEvent(job, "job.started", { command: job.command, cwd });
 	writePbbJob(job, { cwd, status: "running", outcome: "running" });
 }
 
 function appendPbbLogDelta(job: ActiveJob, body: string): void {
 	if (!job.pbb || !body || body === job.lastLoggedBody) return;
+	if (job.lastLoggedBody && body.trimEnd() === job.lastLoggedBody.trimEnd()) {
+		job.lastLoggedBody = body;
+		return;
+	}
 	let delta = body;
 	if (job.lastLoggedBody && body.startsWith(job.lastLoggedBody)) {
 		delta = body.slice(job.lastLoggedBody.length);
